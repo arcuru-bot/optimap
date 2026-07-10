@@ -134,3 +134,11 @@ harness = false
 [[bench]]
 name = "perfect"
 harness = false
+
+[[bench]]
+name = "perfect_memory"
+harness = false
+
+[[bin]]
+name = "lambda_sweep"
+path = "src/bin/lambda_sweep.rs"

@@ -109,7 +109,11 @@ where
         let slot = self.phf.index(hash);
         // SAFETY: same as contains.
         let stored = unsafe { self.slots.get_unchecked(slot) };
-        if stored.borrow() == key { Some(stored) } else { None }
+        if stored.borrow() == key {
+            Some(stored)
+        } else {
+            None
+        }
     }
 
     /// Number of keys.
@@ -134,6 +138,10 @@ where
     /// structure (not counting the key array). Diagnostic only.
     pub fn phf_bits_per_key(&self) -> f64 {
         self.phf.bits_per_key()
+    }
+
+    pub fn bytes_used(&self) -> usize {
+        self.slots.len() * std::mem::size_of::<K>() + self.phf.bytes_on_heap()
     }
 
     /// Access the hash builder used at construction.

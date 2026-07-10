@@ -249,6 +249,7 @@ pub(crate) fn hash_tag(h: u64) -> u8 {
     }
 }
 
+pub mod filter;
 pub mod flat_btree;
 pub mod gaps;
 pub mod generic_map;
@@ -291,6 +292,8 @@ pub use optimap::Policy;
 pub use optimap::VacantEntry;
 
 // ── Perfect-hash maps ──────────────────────────────────────────────────────
+
+pub use filter::{BinaryFuse8, Xor8};
 
 pub use perfect::{
     BucketedConfig, BucketedPhf, BuildError, ChdBuildProfile, ChdPhf, MultilevelBucketedConfig,

@@ -43,6 +43,12 @@ pub trait PerfectHashFunction: Sized {
 
     /// Approximate space overhead, in bits per built key. Diagnostic only.
     fn bits_per_key(&self) -> f64;
+
+    /// Heap bytes owned by the PHF data structure (boxed slices, etc.).
+    /// Defaults to `size_of::<Self>()` — override for types with heap allocations.
+    fn bytes_on_heap(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
 }
 
 /// Reasons a PHF build can fail.

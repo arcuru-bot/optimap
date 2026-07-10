@@ -34,6 +34,7 @@ use bench_helpers::{make_miss_keys, make_random_keys};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use optimap::matrix_types::HighTag128_TombMap;
+use optimap::perfect::PtHashPhf;
 use optimap::{
     PerfectMap, PerfectMapBucketed, PerfectMapMultilevelBucketed, PerfectMapSparse,
     PerfectMapUnchecked, PerfectSet, PerfectSetBucketed, PerfectSetMultilevelBucketed,
@@ -92,6 +93,47 @@ fn bench_construction(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("PerfectSet", n), &keys, |b, k| {
             b.iter(|| {
                 let s = PerfectSet::<u64>::from_iter_perfect(k.iter().copied()).unwrap();
+                black_box(s);
+            });
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectMap (PTHash)", n),
+            &entries,
+            |b, e| {
+                b.iter(|| {
+                    let m = PerfectMap::<u64, u64, PtHashPhf>::from_entries(
+                        e.iter().copied(),
+                        foldhash::fast::RandomState::default(),
+                    )
+                    .unwrap();
+                    black_box(m);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectMapUnchecked (PTHash)", n),
+            &entries,
+            |b, e| {
+                b.iter(|| {
+                    let m = PerfectMapUnchecked::<u64, u64, PtHashPhf>::from_entries(
+                        e.iter().copied(),
+                        foldhash::fast::RandomState::default(),
+                    )
+                    .unwrap();
+                    black_box(m);
+                });
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("PerfectSet (PTHash)", n), &keys, |b, k| {
+            b.iter(|| {
+                let s = PerfectSet::<u64, PtHashPhf>::from_keys(
+                    k.iter().copied(),
+                    foldhash::fast::RandomState::default(),
+                )
+                .unwrap();
                 black_box(s);
             });
         });
@@ -178,6 +220,21 @@ fn bench_lookup_hit(c: &mut Criterion) {
         let pmu =
             PerfectMapUnchecked::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
         let ps = PerfectSet::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
+        let pm_pt = PerfectMap::<u64, u64, PtHashPhf>::from_entries(
+            entries.iter().copied(),
+            foldhash::fast::RandomState::default(),
+        )
+        .unwrap();
+        let pmu_pt = PerfectMapUnchecked::<u64, u64, PtHashPhf>::from_entries(
+            entries.iter().copied(),
+            foldhash::fast::RandomState::default(),
+        )
+        .unwrap();
+        let ps_pt = PerfectSet::<u64, PtHashPhf>::from_keys(
+            keys.iter().copied(),
+            foldhash::fast::RandomState::default(),
+        )
+        .unwrap();
         let pmb =
             PerfectMapBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
         let psb = PerfectSetBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
@@ -240,6 +297,50 @@ fn bench_lookup_hit(c: &mut Criterion) {
                 black_box(count);
             });
         });
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectMap (PTHash)", n),
+            &keys,
+            |b, ks| {
+                b.iter(|| {
+                    let mut sum = 0u64;
+                    for &k in ks {
+                        sum = sum.wrapping_add(*pm_pt.get(&k).unwrap_or(&0));
+                    }
+                    black_box(sum);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectMapUnchecked (PTHash)", n),
+            &keys,
+            |b, ks| {
+                b.iter(|| {
+                    let mut sum = 0u64;
+                    for &k in ks {
+                        sum = sum.wrapping_add(*pmu_pt.get_unchecked(&k));
+                    }
+                    black_box(sum);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectSet (PTHash)", n),
+            &keys,
+            |b, ks| {
+                b.iter(|| {
+                    let mut count = 0u64;
+                    for &k in ks {
+                        if ps_pt.contains(&k) {
+                            count += 1;
+                        }
+                    }
+                    black_box(count);
+                });
+            },
+        );
 
         group.bench_with_input(BenchmarkId::new("PerfectMapBucketed", n), &keys, |b, ks| {
             b.iter(|| {
@@ -330,6 +431,16 @@ fn bench_lookup_miss(c: &mut Criterion) {
         let pm = PerfectMap::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
         let pms = PerfectMapSparse::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
         let ps = PerfectSet::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
+        let pm_pt = PerfectMap::<u64, u64, PtHashPhf>::from_entries(
+            entries.iter().copied(),
+            foldhash::fast::RandomState::default(),
+        )
+        .unwrap();
+        let ps_pt = PerfectSet::<u64, PtHashPhf>::from_keys(
+            keys.iter().copied(),
+            foldhash::fast::RandomState::default(),
+        )
+        .unwrap();
         let pmb =
             PerfectMapBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
         let psb = PerfectSetBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
@@ -386,6 +497,38 @@ fn bench_lookup_miss(c: &mut Criterion) {
                 black_box(count);
             });
         });
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectMap (PTHash)", n),
+            &miss_keys,
+            |b, ks| {
+                b.iter(|| {
+                    let mut count = 0u64;
+                    for &k in ks {
+                        if pm_pt.get(&k).is_none() {
+                            count += 1;
+                        }
+                    }
+                    black_box(count);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectSet (PTHash)", n),
+            &miss_keys,
+            |b, ks| {
+                b.iter(|| {
+                    let mut count = 0u64;
+                    for &k in ks {
+                        if !ps_pt.contains(&k) {
+                            count += 1;
+                        }
+                    }
+                    black_box(count);
+                });
+            },
+        );
 
         group.bench_with_input(
             BenchmarkId::new("PerfectMapBucketed", n),

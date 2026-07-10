@@ -41,6 +41,7 @@
 pub mod bucketed;
 mod chd;
 mod phf;
+mod pthash;
 mod set;
 mod util;
 
@@ -51,6 +52,7 @@ pub use bucketed::{
 };
 pub use chd::{ChdBuildProfile, ChdPhf};
 pub use phf::{BuildError, PerfectHashFunction};
+pub use pthash::PtHashPhf;
 pub use set::PerfectSet;
 
 use crate::map::DefaultHashBuilder;
@@ -201,6 +203,12 @@ where
     /// structure (not counting the slot array). Diagnostic only.
     pub fn phf_bits_per_key(&self) -> f64 {
         self.phf.bits_per_key()
+    }
+
+    /// Total heap memory in use (slot array + PHF metadata). Excludes
+    /// `hash_builder` (opaque, typically 8–48 bytes on the stack).
+    pub fn bytes_used(&self) -> usize {
+        self.slots.len() * std::mem::size_of::<(K, V)>() + self.phf.bytes_on_heap()
     }
 
     /// Access the hash builder used at construction.
@@ -420,6 +428,10 @@ where
         self.phf.bits_per_key()
     }
 
+    pub fn bytes_used(&self) -> usize {
+        self.slots.len() * std::mem::size_of::<Option<(K, V)>>() + self.phf.bytes_on_heap()
+    }
+
     /// Access the hash builder used at construction.
     pub fn hasher(&self) -> &S {
         &self.hash_builder
@@ -551,6 +563,10 @@ where
         self.phf.bits_per_key()
     }
 
+    pub fn bytes_used(&self) -> usize {
+        self.values.len() * std::mem::size_of::<V>() + self.phf.bytes_on_heap()
+    }
+
     /// Access the hash builder used at construction.
     pub fn hasher(&self) -> &S {
         &self.hash_builder
@@ -635,9 +651,14 @@ mod tests {
 
     #[test]
     fn dense_string_keys_round_trip() {
-        let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
-        let entries: Vec<(String, usize)> =
-            words.iter().enumerate().map(|(i, w)| (w.to_string(), i)).collect();
+        let words = [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+        ];
+        let entries: Vec<(String, usize)> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.to_string(), i))
+            .collect();
         let m = PerfectMap::<String, usize>::from_iter_perfect(entries.clone()).unwrap();
         for (k, v) in &entries {
             assert_eq!(m.get(k.as_str()), Some(v), "key={k}");

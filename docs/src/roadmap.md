@@ -354,18 +354,40 @@ The `PerfectHashFunction` trait is the slot — each algorithm is a new
 `impl` selected via the `P` type parameter on `PerfectMap` /
 `PerfectMapSparse` / `PerfectMapUnchecked` / `PerfectSet`.
 
-#### PTHash impl of `PerfectHashFunction`
+#### PTHash impl of `PerfectHashFunction` — SHIPPED (fixed-width), compact encoding deferred
 
-**Difficulty**: Medium \
-**Expected impact**: ~30 % smaller than CHD per bits/key (1.5–2 vs 2–3),
-modest query-time win in published benchmarks.
+`PtHashPhf` (Pibiri-Trani 2021) is implemented in `src/perfect/pthash.rs`
+and plugs into `PerfectMap` / `PerfectMapUnchecked` / `PerfectSet` /
+`PerfectMapSparse` via the `PerfectHashFunction` trait. Two-level bucketed
+displacement search (λ = 4), displacements **bit-packed at a fixed width**
+`ceil(log₂ m) + 1`. Covered by `benches/perfect.rs` (construction / hit /
+miss) and `benches/perfect_memory.rs`.
 
-PTHash (Pibiri-Trani 2021) partitions the key set, runs a CHD-like
-displacement search per partition, then Elias-Fano-encodes the
-displacement table. The encoding is the work — the CHD core inside each
-partition reuses most of the existing `ChdPhf` machinery. Worth doing
-once we have a criterion bench harness in place so the bits/key win can
-be validated against the build-time cost.
+**What did NOT happen: the memory win.** The headline "~30 % smaller,
+~2.4 bits/key" from the paper comes from Elias-Fano / dictionary-encoding
+the pilot table. That encoding is deliberately *not* implemented — the
+fixed-width table lands at **~5.3 bits/key at 1M vs CHD's ~6.4** (0.66 vs
+0.80 bytes/key of PHF). That's ~17 % off the PHF, but the slot array (8
+B/key for u64 values) dominates the map, so total memory moves ~2 % on the
+stored map, ~4 % on `Unchecked` — noise. The paper's bits/key is only a
+headline number for the PHF held *standalone*.
+
+**What DID happen: build speed.** λ = 4 + the +1-bit displacement headroom
+converge much faster than CHD's λ = 5 linear walk: **~2.6–3× faster
+construction** (2.1 ms vs 6.7 ms at 10K, 26 ms vs 69 ms at 100K), same
+lookup shape as CHD. So `PtHashPhf` ships as the **fast-build CHD
+alternative**, not a smaller one.
+
+**Deferred — the compact encoding.** Reaching the paper's ~2.4 bits/key
+means Elias-Fano or dictionary-encoding the displacements. Analysis (see
+below) says it is *not* a clean win: every scheme that hits the target
+adds decode work or an indirection to the `index()` hot path, in exchange
+for a ~4 % total-map memory saving. The one same-speed variant —
+right-sizing the global width to the actual max displacement instead of
+`ceil(log₂ m)+1` — is defeated at minimal `m`, where the long tail pushes
+max-d back near `log₂(m)` (why the `+1` headroom exists). Only worth
+building for a workload that holds the PHF standalone with memory as the
+binding constraint; measure the actual minimal-`m` max displacement first.
 
 #### BBHash impl of `PerfectHashFunction`
 
@@ -572,6 +594,11 @@ attempts (vs CHD's near-`m/(m − occupied)` blow-up at minimal load).
 At λ=5, λ²=25 — three orders of magnitude smaller than the observed
 average. Even pessimistic constant factors make this the largest
 algorithmic lever in the queue.
+
+Note: the shipped `PtHashPhf` (see above) does *not* implement this —
+it uses a plain linear `d` walk like CHD, and gets its build-speed win
+purely from the smaller λ = 4 buckets. The pilot-permutation search is
+still an open lever, and would stack with parallel multi-seed.
 
 #### Tunable `λ` (avg bucket size)
 

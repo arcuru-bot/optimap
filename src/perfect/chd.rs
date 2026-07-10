@@ -21,6 +21,11 @@ use super::phf::{BuildError, PerfectHashFunction};
 use super::util::{bucket_of, has_duplicate};
 use std::time::{Duration, Instant};
 
+#[inline]
+fn boxed_slice_bytes<T>(b: &Box<[T]>) -> usize {
+    b.len() * std::mem::size_of::<T>()
+}
+
 /// Default average bucket size. CHD's theoretical lower bound is around
 /// λ ≈ 4 for minimal PHFs; λ = 5 is a common practical default — fewer
 /// buckets, smaller displacement table, harder construction.
@@ -125,10 +130,7 @@ impl ChdPhf {
         m: usize,
     ) -> Result<(Self, ChdBuildProfile), BuildError> {
         let n = hashes.len();
-        assert!(
-            m >= n,
-            "PHF table size m={m} must be >= key count n={n}"
-        );
+        assert!(m >= n, "PHF table size m={m} must be >= key count n={n}");
         assert!(
             m <= u32::MAX as usize,
             "PerfectMap does not support tables larger than u32::MAX slots"
@@ -167,43 +169,41 @@ impl ChdPhf {
             let cancelled = AtomicBool::new(false);
             let duplicate = AtomicBool::new(false);
 
-            let result: Option<(ChdPhf, ChdBuildProfile)> =
-                (0..MAX_SEED_RETRIES)
-                    .into_par_iter()
-                    .find_map_any(|seed_try| {
-                        if cancelled.load(Ordering::Relaxed) {
-                            return None;
-                        }
-                        let seed = SEED_BASE.wrapping_add(seed_try as u64);
-                        let mut local_profile = ChdBuildProfile {
-                            duplicate_check: dup_elapsed,
-                            bucket_count: r,
-                            ..Default::default()
-                        };
+            let result: Option<(ChdPhf, ChdBuildProfile)> = (0..MAX_SEED_RETRIES)
+                .into_par_iter()
+                .find_map_any(|seed_try| {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    let seed = SEED_BASE.wrapping_add(seed_try as u64);
+                    let mut local_profile = ChdBuildProfile {
+                        duplicate_check: dup_elapsed,
+                        bucket_count: r,
+                        ..Default::default()
+                    };
 
-                        match try_build_seed(hashes, m, r, seed, &mut local_profile, Some(&cancelled))
-                        {
-                            Ok(disp) => {
-                                cancelled.store(true, Ordering::Release);
-                                local_profile.seed_retries = seed_try + 1;
-                                local_profile.total = t_total.elapsed();
-                                Some((
-                                    ChdPhf {
-                                        seed,
-                                        displacements: disp.into_boxed_slice(),
-                                        m: m as u32,
-                                    },
-                                    local_profile,
-                                ))
-                            }
-                            Err(BuildError::DuplicateHash) => {
-                                duplicate.store(true, Ordering::Release);
-                                cancelled.store(true, Ordering::Release);
-                                None
-                            }
-                            Err(BuildError::Exhausted) => None,
+                    match try_build_seed(hashes, m, r, seed, &mut local_profile, Some(&cancelled)) {
+                        Ok(disp) => {
+                            cancelled.store(true, Ordering::Release);
+                            local_profile.seed_retries = seed_try + 1;
+                            local_profile.total = t_total.elapsed();
+                            Some((
+                                ChdPhf {
+                                    seed,
+                                    displacements: disp.into_boxed_slice(),
+                                    m: m as u32,
+                                },
+                                local_profile,
+                            ))
                         }
-                    });
+                        Err(BuildError::DuplicateHash) => {
+                            duplicate.store(true, Ordering::Release);
+                            cancelled.store(true, Ordering::Release);
+                            None
+                        }
+                        Err(BuildError::Exhausted) => None,
+                    }
+                });
 
             if duplicate.load(Ordering::Acquire) {
                 return Err(BuildError::DuplicateHash);
@@ -272,8 +272,12 @@ impl PerfectHashFunction for ChdPhf {
         }
         // n is unknown to the PHF after build — approximate from λ.
         let n_approx = (self.displacements.len() * DEFAULT_LAMBDA) as f64;
-        let bits = (self.displacements.len() * 32 + 64 /* seed */) as f64;
+        let bits = (self.displacements.len() * 32 + 64/* seed */) as f64;
         bits / n_approx
+    }
+
+    fn bytes_on_heap(&self) -> usize {
+        boxed_slice_bytes(&self.displacements)
     }
 }
 
