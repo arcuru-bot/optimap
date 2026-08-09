@@ -2357,10 +2357,11 @@ mod tests {
         }
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "strictly ascending")]
     fn from_sorted_iter_unsorted_panics_in_debug() {
-        // Only debug builds panic. The test runs under cfg(test) which is debug.
+        // Debug-only: the panic comes from debug_assert!, which is stripped in release builds.
         let _: FlatBTree<i32, i32> = FlatBTree::from_sorted_iter([(2, 0), (1, 0), (3, 0)]);
     }
 
