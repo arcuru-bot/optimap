@@ -146,10 +146,10 @@ So the gap is specific to **cold allocate-then-fill**. It is _not_ the steady-st
 
 Methodology note: the original sweep `keys[prev_n..n]` small-batch numbers are noise-heavy and resize-spike-dominated; ignore them for this — use the `construction` criterion benches above, which are stable and isolate alloc/resize/fill.
 
-#### Hashbrown wins at large N on lookup_hit — diagnosis complete, implementation pending
+#### Hashbrown wins at large N on lookup_hit — diagnosis complete; fix shipped (K/V prefetch drop default, byte-offset probe opt-in & neutral)
 
 **Difficulty**: Medium \
-**Status (2026-05-22):** Diagnosis complete. Root cause identified mechanistically: Tomb's probe loop emits 11 instructions per probe step vs hashbrown's 3, consuming 3 load-port slots per probe vs 1, with duplicate `gi → gi * 16` computation across two registers. IPC at the resize transient is 0.88 vs hashbrown's 1.23. Full write-up: **[Tomb lookup_hit IPC Gap](optimization/tomb-lookup-ipc-gap.md)** — includes the disassembly comparison, hardware-counter evidence, five rejected hypotheses with reasons, the fix design (byte-offset probe refactor), and a reproduction harness.
+**Status (2026-05-22):** Diagnosis complete. Root cause identified mechanistically: Tomb's probe loop emits 11 instructions per probe step vs hashbrown's 3, consuming 3 load-port slots per probe vs 1, with duplicate `gi → gi * 16` computation across two registers. IPC at the resize transient is 0.88 vs hashbrown's 1.23. Full write-up: **[Tomb lookup_hit IPC Gap](optimization/tomb-lookup-ipc-gap.md)** — includes the disassembly comparison, hardware-counter evidence, five rejected hypotheses with reasons, the fix design (byte-offset probe refactor), and a reproduction harness. **Implementation shipped 2026-05-22 (commit c137aee):** the K/V prefetch drop is now the Tomb-family default (~-3% mean); the byte-offset probe lives behind the `tomb-byte-offset-probe` flag and is measured neutral (cleaner disassembly, no cycle win). See the post-implementation update in the write-up.
 
 The summary below is preserved as a historical record of the experiment loop. New work should reference the dedicated investigation document.
 
