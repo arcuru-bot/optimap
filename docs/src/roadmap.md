@@ -624,7 +624,7 @@ Note: the shipped `PtHashPhf` (see above) does *not* implement this —
 it uses a plain linear `d` walk like CHD, and gets its build-speed win
 purely from the smaller λ = 4 buckets.
 
-#### Tunable `λ` (avg bucket size)
+#### ~~Tunable `λ` (avg bucket size)~~ **SHIPPED**
 
 **Difficulty**: Low \
 **Expected impact**: speed-vs-space tradeoff at build time.
@@ -636,6 +636,24 @@ Higher λ does the opposite. Expose as a build-time const or a
 `ChdConfig` so callers building large maps can trade space for build
 time. Likely interacts with the parallel-build work — pick after
 profiling shows which stage is actually bottlenecked.
+
+**Shipped (2026-08-18).** The pilot-table entry directly above settled the
+sequencing question: the displacement search is still the bottleneck and
+still geometric in bucket size, so λ trades space-for-build-time exactly as
+described here. Exposed as `ChdPhf::build_with_lambda(hashes, m, λ)` and its
+profiling variant `ChdPhf::build_with_profile_lambda(hashes, m, λ)` — the
+latter is the honest way to measure λ's effect, since attempt counts (not
+wall-clock) are the signal. The existing `build`, `build_with_profile` and
+`build_with_profile_pilot` stay thin wrappers at the default λ = 5, and
+`ChdPhf` now stores its λ so `bits_per_key` reports the actual `~32/λ`
+rather than assuming the default. Shape note: the "build-time const or
+`ChdConfig`" question settled on the runtime build parameter that
+`PtHashPhf::build_with_lambda` already established in this family — no const
+generic, no config struct. The `PerfectMap` / `PerfectMapSparse` wrappers
+still build at the default λ; at that level the higher-leverage build knob
+remains `PerfectMapSparse`'s `load_factor` (slack `m/n > 1` collapses
+attempts ~29× at 1.23). Measuring the exact λ-vs-attempts curve across
+{2,3,4,5,6,8} is a follow-up, not shipped here.
 
 ### Hot-path optimization
 

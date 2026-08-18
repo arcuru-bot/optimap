@@ -132,6 +132,10 @@ pub struct ChdPhf {
     displacements: Box<[u32]>,
     /// Table size `m` (slot domain).
     m: u32,
+    /// Average bucket size `λ` this PHF was built with. Lookup never
+    /// reads it; it exists solely so [`bits_per_key`](Self::bits_per_key)
+    /// can approximate `n ≈ r · λ` without assuming the default.
+    lambda: usize,
     /// Whether the displacement table stores PTHash-style *pilots* rather
     /// than CHD displacements. Pilots are mixed with the per-key position
     /// hash by XOR on lookup (see [`ChdPhf::build_with_profile_pilot`]).
@@ -146,7 +150,37 @@ impl ChdPhf {
         hashes: &[u64],
         m: usize,
     ) -> Result<(Self, ChdBuildProfile), BuildError> {
-        Self::build_impl(hashes, m, try_build_seed, false)
+        Self::build_with_profile_lambda(hashes, m, DEFAULT_LAMBDA)
+    }
+
+    /// [`build_with_profile`](Self::build_with_profile) at an explicit
+    /// average bucket size `λ`.
+    ///
+    /// Lower `λ` → more, smaller buckets → an easier per-bucket displacement
+    /// search (faster build) at the cost of a larger displacement table:
+    /// `r = ceil(n/λ)` entries at 32 bits each, i.e. `~32/λ` bits/key.
+    /// Higher `λ` trades the other way — fewer, bigger buckets, so the
+    /// per-bucket geometric blow-up `(1/(1 − α))^|bucket|` bites harder.
+    ///
+    /// `λ` must be > 0. The default is [`DEFAULT_LAMBDA`] (5); CHD's
+    /// theoretical lower bound for minimal PHFs is around λ ≈ 4. Beyond
+    /// the default, minimal (`m = n`) builds grow increasingly likely to
+    /// exhaust [`MAX_SEED_RETRIES`] — if that happens, give the table slack
+    /// (`m > n`) rather than chasing a larger λ.
+    pub fn build_with_profile_lambda(
+        hashes: &[u64],
+        m: usize,
+        lambda: usize,
+    ) -> Result<(Self, ChdBuildProfile), BuildError> {
+        assert!(lambda > 0, "lambda must be > 0, got {lambda}");
+        Self::build_impl(hashes, m, lambda, try_build_seed, false)
+    }
+
+    /// Build without profiling at an explicit `λ`. Thin wrapper over
+    /// [`build_with_profile_lambda`](Self::build_with_profile_lambda) that
+    /// drops the [`ChdBuildProfile`].
+    pub fn build_with_lambda(hashes: &[u64], m: usize, lambda: usize) -> Result<Self, BuildError> {
+        Self::build_with_profile_lambda(hashes, m, lambda).map(|(phf, _)| phf)
     }
 
     /// Build a PHF using PTHash's *pilot* displacement search instead of
@@ -168,7 +202,7 @@ impl ChdPhf {
         m: usize,
     ) -> Result<(Self, ChdBuildProfile), BuildError> {
         let m_eff = if m.is_power_of_two() { m + 1 } else { m };
-        Self::build_impl(hashes, m_eff, try_build_seed_pilot, true)
+        Self::build_impl(hashes, m_eff, DEFAULT_LAMBDA, try_build_seed_pilot, true)
     }
 
     /// Shared construction driver. `search` picks the per-bucket
@@ -177,6 +211,7 @@ impl ChdPhf {
     fn build_impl(
         hashes: &[u64],
         m: usize,
+        lambda: usize,
         search: SeedBuilder,
         pilot: bool,
     ) -> Result<(Self, ChdBuildProfile), BuildError> {
@@ -197,6 +232,7 @@ impl ChdPhf {
                     seed: 0,
                     displacements: Box::new([]),
                     m: m as u32,
+                    lambda,
                     pilot,
                 },
                 profile,
@@ -211,7 +247,7 @@ impl ChdPhf {
         }
 
         // r = ceil(n / λ), at least 1.
-        let r = ((n + DEFAULT_LAMBDA - 1) / DEFAULT_LAMBDA).max(1);
+        let r = ((n + lambda - 1) / lambda).max(1);
 
         #[cfg(feature = "parallel-build")]
         {
@@ -244,6 +280,7 @@ impl ChdPhf {
                                     seed,
                                     displacements: disp.into_boxed_slice(),
                                     m: m as u32,
+                                    lambda,
                                     pilot,
                                 },
                                 local_profile,
@@ -281,6 +318,7 @@ impl ChdPhf {
                                 seed,
                                 displacements: disp.into_boxed_slice(),
                                 m: m as u32,
+                                lambda,
                                 pilot,
                             },
                             profile,
@@ -336,7 +374,7 @@ impl PerfectHashFunction for ChdPhf {
             return 0.0;
         }
         // n is unknown to the PHF after build — approximate from λ.
-        let n_approx = (self.displacements.len() * DEFAULT_LAMBDA) as f64;
+        let n_approx = (self.displacements.len() * self.lambda) as f64;
         let bits = (self.displacements.len() * 32 + 64/* seed */) as f64;
         bits / n_approx
     }
@@ -727,6 +765,83 @@ mod tests {
         assert!(profile.displacement_attempts >= profile.bucket_count as u64);
         // Largest bucket can't exceed n.
         assert!(profile.max_bucket_size > 0 && profile.max_bucket_size as usize <= n);
+    }
+
+    #[test]
+    fn build_with_lambda_round_trips_at_minimal_load() {
+        // Every λ ≤ 5 is no harder than the default minimal build, so all
+        // of these must succeed collision-free at m = n.
+        for &lambda in &[1usize, 2, 3, 4, 5] {
+            let n = 20_000;
+            let hashes = make_hashes(n);
+            let phf = ChdPhf::build_with_lambda(&hashes, n, lambda)
+                .unwrap_or_else(|e| panic!("build should succeed at λ={lambda}, m=n: {e:?}"));
+            assert_eq!(phf.capacity(), n);
+            let mut seen = vec![false; n];
+            for &h in &hashes {
+                let s = phf.index(h);
+                assert!(s < n, "slot {s} out of range at n={n}, λ={lambda}");
+                assert!(!seen[s], "collision at slot {s} for n={n}, λ={lambda}");
+                seen[s] = true;
+            }
+            assert!(
+                seen.iter().all(|&b| b),
+                "not every slot filled at λ={lambda}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_with_lambda_high_lambda_succeeds_with_slack() {
+        // λ=8 is past the default and near-impossible at minimal load, but
+        // with generous slack (α = 0.5) the displacement search stays cheap.
+        let n = 5_000;
+        let m = n * 2;
+        let hashes = make_hashes(n);
+        let phf = ChdPhf::build_with_lambda(&hashes, m, 8).unwrap();
+        let mut seen = vec![false; m];
+        for &h in &hashes {
+            let s = phf.index(h);
+            assert!(!seen[s], "collision at slot {s} for λ=8, m=2n");
+            seen[s] = true;
+        }
+        assert_eq!(seen.iter().filter(|b| **b).count(), n);
+    }
+
+    #[test]
+    fn build_with_profile_lambda_reports_bucket_count() {
+        let n = 10_000;
+        let hashes = make_hashes(n);
+        for &lambda in &[2usize, 3, 4, 5] {
+            let (_phf, profile) = ChdPhf::build_with_profile_lambda(&hashes, n, lambda).unwrap();
+            let expect = (n + lambda - 1) / lambda;
+            assert_eq!(profile.bucket_count, expect, "λ={lambda}");
+        }
+    }
+
+    #[test]
+    fn bits_per_key_tracks_lambda() {
+        let n = 10_000;
+        let hashes = make_hashes(n);
+        let small = ChdPhf::build_with_lambda(&hashes, n, 2)
+            .unwrap()
+            .bits_per_key();
+        let large = ChdPhf::build_with_lambda(&hashes, n, 5)
+            .unwrap()
+            .bits_per_key();
+        assert!(
+            small > large,
+            "bits_per_key should fall as λ rises (λ=2 → {small}, λ=5 → {large})"
+        );
+    }
+
+    #[test]
+    fn lambda_zero_panics() {
+        let hashes = make_hashes(100);
+        let result = std::panic::catch_unwind(|| {
+            let _ = ChdPhf::build_with_lambda(&hashes, 100, 0);
+        });
+        assert!(result.is_err(), "λ = 0 should panic");
     }
 
     #[test]
