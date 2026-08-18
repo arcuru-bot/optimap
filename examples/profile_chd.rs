@@ -12,7 +12,7 @@
 //!   3. Prints total wall time and the per-phase split alongside the
 //!      attempt-counter diagnostics.
 
-use optimap::{ChdPhf, PerfectHashFunction};
+use optimap::{ChdBuildProfile, ChdPhf, PerfectHashFunction};
 use std::time::Duration;
 
 #[path = "../benches/bench_helpers.rs"]
@@ -79,81 +79,84 @@ fn main() {
     for &n in &sizes {
         let m = ((n as f64) * m_factor).ceil() as usize;
         println!();
-        println!(
-            "─── ChdPhf::build_with_profile  n = {n}  m = {m}  (m/n = {m_factor:.3}) ───"
-        );
+        println!("─── ChdPhf construction  n = {n}  m = {m}  (m/n = {m_factor:.3}) ───");
         let hashes = unique_hashes(n, 0x9E37_79B9_7F4A_7C15);
-        let (phf, p) = ChdPhf::build_with_profile(&hashes, m)
-            .expect("build at the default λ=5 should succeed");
-        debug_assert!(phf.bits_per_key().is_finite());
 
-        // Sum of the per-retry phase Durations. `total` covers everything
-        // (duplicate check + this sum + leftover scheduling), so the
-        // residual exposes any work outside the instrumented phases.
-        let inner_sum = p.bucket_assign
-            + p.counting_sort
-            + p.order_sort
-            + p.displacement_search;
-        let accounted = p.duplicate_check + inner_sum;
-        let residual = p.total.saturating_sub(accounted);
+        let (chd, chd_p) = ChdPhf::build_with_profile(&hashes, m)
+            .expect("CHD build at the default λ=5 should succeed");
+        print_profile("CHD (mixed-d walk)", n, &chd, &chd_p);
 
-        println!("  total              {}             100.0%", fmt_ms(p.total));
-        println!(
-            "    duplicate check  {}             {}",
-            fmt_ms(p.duplicate_check),
-            pct(p.duplicate_check, p.total)
-        );
-        println!(
-            "    bucket assign    {}             {}",
-            fmt_ms(p.bucket_assign),
-            pct(p.bucket_assign, p.total)
-        );
-        println!(
-            "    counting sort    {}             {}",
-            fmt_ms(p.counting_sort),
-            pct(p.counting_sort, p.total)
-        );
-        println!(
-            "    order sort       {}             {}",
-            fmt_ms(p.order_sort),
-            pct(p.order_sort, p.total)
-        );
-        println!(
-            "    displacement     {}             {}",
-            fmt_ms(p.displacement_search),
-            pct(p.displacement_search, p.total)
-        );
-        println!(
-            "    residual         {}             {}",
-            fmt_ms(residual),
-            pct(residual, p.total)
-        );
+        let (pilot, pilot_p) = ChdPhf::build_with_profile_pilot(&hashes, m)
+            .expect("pilot build at the default λ=5 should succeed");
+        print_profile("Pilot (XOR permutation)", n, &pilot, &pilot_p);
 
+        // Attempt-count comparison is the headline: the pilot scheme should
+        // be measured against CHD on the *same* input, not on wall-clock.
+        let ratio =
+            chd_p.displacement_attempts as f64 / pilot_p.displacement_attempts.max(1) as f64;
         println!();
         println!(
-            "  seed_retries           {:>10}",
-            p.seed_retries
-        );
-        println!(
-            "  bucket_count           {:>10}    (n / λ = {} / 5)",
-            p.bucket_count, n
-        );
-        println!(
-            "  max_bucket_size        {:>10}",
-            p.max_bucket_size
-        );
-        println!(
-            "  displacement_attempts  {:>10}    ({:.2} avg per bucket)",
-            p.displacement_attempts,
-            p.displacement_attempts as f64 / p.bucket_count.max(1) as f64
-        );
-        println!(
-            "  max_displacement_used  {:>10}",
-            p.max_displacement_used
-        );
-        println!(
-            "  bits_per_key (PHF)     {:>10.3}",
-            phf.bits_per_key()
+            "  attempts CHD/pilot       {:>10.2}×  ({} vs {})",
+            ratio, chd_p.displacement_attempts, pilot_p.displacement_attempts
         );
     }
+}
+
+fn print_profile(label: &str, n: usize, phf: &ChdPhf, p: &ChdBuildProfile) {
+    debug_assert!(phf.bits_per_key().is_finite());
+
+    let inner_sum = p.bucket_assign + p.counting_sort + p.order_sort + p.displacement_search;
+    let accounted = p.duplicate_check + inner_sum;
+    let residual = p.total.saturating_sub(accounted);
+
+    println!();
+    println!("  [{label}]");
+    println!(
+        "    total              {}             100.0%",
+        fmt_ms(p.total)
+    );
+    println!(
+        "      duplicate check  {}             {}",
+        fmt_ms(p.duplicate_check),
+        pct(p.duplicate_check, p.total)
+    );
+    println!(
+        "      bucket assign    {}             {}",
+        fmt_ms(p.bucket_assign),
+        pct(p.bucket_assign, p.total)
+    );
+    println!(
+        "      counting sort    {}             {}",
+        fmt_ms(p.counting_sort),
+        pct(p.counting_sort, p.total)
+    );
+    println!(
+        "      order sort       {}             {}",
+        fmt_ms(p.order_sort),
+        pct(p.order_sort, p.total)
+    );
+    println!(
+        "      displacement     {}             {}",
+        fmt_ms(p.displacement_search),
+        pct(p.displacement_search, p.total)
+    );
+    println!(
+        "      residual         {}             {}",
+        fmt_ms(residual),
+        pct(residual, p.total)
+    );
+    println!();
+    println!("    seed_retries           {:>10}", p.seed_retries);
+    println!(
+        "    bucket_count           {:>10}    (n / λ = {} / 5)",
+        p.bucket_count, n
+    );
+    println!("    max_bucket_size        {:>10}", p.max_bucket_size);
+    println!(
+        "    displacement_attempts  {:>10}    ({:.2} avg per bucket)",
+        p.displacement_attempts,
+        p.displacement_attempts as f64 / p.bucket_count.max(1) as f64
+    );
+    println!("    max_displacement_used  {:>10}", p.max_displacement_used);
+    println!("    bits_per_key (PHF)     {:>10.3}", phf.bits_per_key());
 }

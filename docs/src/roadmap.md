@@ -578,27 +578,51 @@ regime, and the profile's `max_displacement_used = 1.32 M` on a
 and keeping the median-fast one cuts much more than `1/threads`
 because the slow runs have outsized attempt counts.
 
-#### Smarter per-bucket displacement search (PTHash pilot table)
+#### ~~Smarter per-bucket displacement search (PTHash pilot table)~~ TESTED — negative for attempt count
 
 **Difficulty**: Medium \
-**Expected impact**: orthogonal speedup to parallel multi-seed — attacks
+**Expected impact**: ~~orthogonal speedup to parallel multi-seed — attacks
 the *per-attempt* count instead of distributing it. Stacking both
-should compound.
+should compound.~~ **Measured (2026-08-17): does NOT reduce attempt count.
+The `O(λ²)` expectation below was wrong.**
 
-The profile shows 213 M displacement attempts at 1M for 200K buckets:
-`avg = 1064`/bucket, but the long tail dominates — `max_d = 1.32 M`.
-CHD's linear `d = 0, 1, 2, …` walk has no escape valve. PTHash's
-pilot table uses a per-bucket pilot index plus a precomputed
-displacement permutation so the search converges in `O(λ²)` expected
-attempts (vs CHD's near-`m/(m − occupied)` blow-up at minimal load).
-At λ=5, λ²=25 — three orders of magnitude smaller than the observed
-average. Even pessimistic constant factors make this the largest
-algorithmic lever in the queue.
+The pilot search was implemented as
+`ChdPhf::build_with_profile_pilot` (PTHash §4.1: a bucket's *pilot* `k`
+is tried in increasing order, position = `(h(x,seed) ⊕ h(k,seed)) mod m`,
+each key's position hash precomputed once, each pilot costing one mixer
+call + one XOR per key). Measured against CHD on the same SFC64 input and
+the same machine (carbon):
+
+| N    | CHD attempts | pilot attempts | ratio | CHD displacement | pilot displacement |
+| ---- | ------------ | -------------- | ----- | ---------------- | ------------------ |
+| 100K | 19 940 154   | 21 251 875     | 0.94× | 77.3 ms          | 67.5 ms            |
+| 1M   | 212 953 274  | 214 159 719    | 0.99× | 796.1 ms         | 724.6 ms           |
+
+Attempt counts are identical within noise — the pilot scheme does not
+change the geometry. Both CHD's mixed-`d` walk and the pilot XOR search
+draw each (key, displacement) pair from an independent uniform slot
+distribution, so the expected per-bucket pilot count is the same geometric
+`(1/(1 − α))^|bucket|` that blows up toward `m/(m − occupied)` at minimal
+load. The `O(λ²)` figure in the original plan (λ² = 25 vs the observed
+1064 average) was a misreading of the paper — PTHash's own Eq. (4) gives
+`E[k] = (1/(1 − α))^|B| − 1`, not a constant.
+
+What the pilot scheme *does* buy is a ~9 % constant factor on the
+displacement phase (one XOR + one precomputed position hash per key per
+attempt vs a full splitmix64), plus a caveat: XOR-position cannot separate
+two keys that share their low `k` bits when `m = 2^k`, so power-of-two
+table sizes are mapped to `m + 1` (the paper's §4.1 prescription).
+
+**Conclusion.** The real levers for minimal-build attempt count remain
+slack (`m/n > 1` — 29× fewer attempts at 1.23, already exposed via
+`PerfectMapSparse`) and parallel multi-seed (already shipped). The pilot
+search is kept as a tested alternative (`build_with_profile_pilot`) for
+the small build-time win, but it is *not* the largest algorithmic lever
+this entry claimed.
 
 Note: the shipped `PtHashPhf` (see above) does *not* implement this —
 it uses a plain linear `d` walk like CHD, and gets its build-speed win
-purely from the smaller λ = 4 buckets. The pilot-permutation search is
-still an open lever, and would stack with parallel multi-seed.
+purely from the smaller λ = 4 buckets.
 
 #### Tunable `λ` (avg bucket size)
 
