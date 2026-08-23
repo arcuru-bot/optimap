@@ -38,11 +38,11 @@ benches/
 
 ### sweep.rs (ankerl-style)
 
-Standalone binary (not criterion). Sweeps all 7 designs across 362 log-spaced N-points from 100 to 10M. Each point runs 5 trials with calibrated minimum measurement time; reports median ns/op. Outputs CSV to stdout.
+Standalone binary (not criterion). Sweeps all 7 designs across 362 log-spaced N-points from 100 to 10M. Each point runs 5 timed trials with calibrated minimum measurement time; reports median ns/op. Before every point it runs one explicit, equivalent **untimed** warmup pass (`--warmup-passes N`, default 1); set it to zero only when diagnosing warmup effects. Outputs CSV to stdout.
 
-Operations: insert, lookup_hit, lookup_miss, remove, iterate.
+Operations: insert, lookup_hit, lookup_miss, remove, iterate. Insert warmups replay the whole incremental sweep in a fresh map; destructive remove warmups rebuild a fresh map. All other warmups execute the same calibrated operation count that will be timed.
 
-Pipeline: `./scripts/sweep-bench.sh` runs the benchmark, saves timestamped CSV to `bench-results/`, and generates per-operation PNG graphs via gnuplot.
+Pipeline: `./scripts/sweep-bench.sh` runs the benchmark, saves timestamped CSV to `bench-results/`, and generates per-operation PNG graphs via gnuplot. `scripts/aggregate-sweeps.py output.csv run-a/sweep.csv run-b/sweep.csv` pointwise aggregates repeated, same-SHA CSVs by deterministic upper median while preserving the existing `operation,design,n,ns_per_op` schema. It refuses inputs with different `meta.json` `git_sha` values. Feed that aggregate to `scripts/cv-compare.py` before making CV or peak/floor claims. A single CSV remains valid for a one-run mean/curve reading; it simply is not evidence for consistency claims.
 
 This captures what criterion benchmarks miss: rehash sawtooth, cache boundary transitions, and natural load factor cycling across the full N range.
 

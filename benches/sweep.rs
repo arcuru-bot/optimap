@@ -15,6 +15,7 @@
 //!   cargo bench --bench sweep -- --width 32              # restrict to 32-slot SIMD
 //!   cargo bench --bench sweep -- --max-n 100000          # cap N range
 //!   cargo bench --bench sweep -- --trials 3              # fewer trials (faster)
+//!   cargo bench --bench sweep -- --warmup-passes 1       # untimed per-N passes
 //!
 //! Design sets (cluster-based):
 //!   curated  — one representative per perf cluster (default; 12 designs)
@@ -42,6 +43,7 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_MAX_N: usize = 10_000_000;
 const DEFAULT_TRIALS: usize = 5;
+const DEFAULT_WARMUP_PASSES: usize = 1;
 
 /// Target minimum wall time per measurement point. If a single pass is shorter
 /// than this, we increase the ops count to compensate.
@@ -130,6 +132,7 @@ impl WidthFilter {
 struct Config {
     max_n: usize,
     trials: usize,
+    warmup_passes: usize,
     filter_op: Option<String>,
     filter_design: Option<String>,
     design_set: DesignSet,
@@ -141,6 +144,7 @@ fn parse_args() -> Config {
     let mut config = Config {
         max_n: DEFAULT_MAX_N,
         trials: DEFAULT_TRIALS,
+        warmup_passes: DEFAULT_WARMUP_PASSES,
         filter_op: None,
         filter_design: None,
         design_set: DesignSet::Curated,
@@ -172,6 +176,10 @@ fn parse_args() -> Config {
             "--trials" => {
                 i += 1;
                 config.trials = args[i].parse().expect("--trials must be a number");
+            }
+            "--warmup-passes" => {
+                i += 1;
+                config.warmup_passes = args[i].parse().expect("--warmup-passes must be a number");
             }
             _ => {}
         }
@@ -289,16 +297,28 @@ fn calibrate_repeats(ops: usize, mut f: impl FnMut(usize)) -> usize {
 /// Insert is special: it's incremental and each batch changes the table state,
 /// so we can't repeat the same batch. Instead we run the full sweep `trials`
 /// times and take the median per point.
-fn sweep_insert<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u64], trials: usize) {
+fn sweep_insert<M: Map<u64, u64>>(
+    design: &str,
+    points: &[usize],
+    keys: &[u64],
+    trials: usize,
+    warmup_passes: usize,
+) {
     // Collect all trials
     let num_points = points.len();
     let mut all_ns: Vec<Vec<f64>> = vec![Vec::with_capacity(trials); num_points];
 
     for _trial in 0..trials {
         let mut map = M::new();
+        let mut warmup_map = M::new();
         let mut prev_n = 0;
         for (pi, &n) in points.iter().enumerate() {
             let batch = &keys[prev_n..n];
+            for _ in 0..warmup_passes {
+                for (i, &k) in batch.iter().enumerate() {
+                    black_box(warmup_map.insert(k, (prev_n + i) as u64));
+                }
+            }
             let start = Instant::now();
             for (i, &k) in batch.iter().enumerate() {
                 black_box(map.insert(k, (prev_n + i) as u64));
@@ -322,7 +342,13 @@ fn sweep_insert<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u64], 
 
 /// Lookup hit sweep: grow table incrementally, measure lookups at each size.
 /// Multiple trials per point with calibrated op count.
-fn sweep_lookup_hit<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u64], trials: usize) {
+fn sweep_lookup_hit<M: Map<u64, u64>>(
+    design: &str,
+    points: &[usize],
+    keys: &[u64],
+    trials: usize,
+    warmup_passes: usize,
+) {
     let mut map = M::new();
     let mut prev_n = 0;
 
@@ -343,6 +369,13 @@ fn sweep_lookup_hit<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u6
         });
 
         let total_ops = ops * repeats;
+        for _ in 0..warmup_passes {
+            let mut sum = 0u64;
+            for i in 0..total_ops {
+                sum = sum.wrapping_add(*black_box(map.get(&keys[i % n]).unwrap_or(&0)));
+            }
+            black_box(sum);
+        }
         let mut samples = Vec::with_capacity(trials);
         for _ in 0..trials {
             let start = Instant::now();
@@ -366,6 +399,7 @@ fn sweep_lookup_miss<M: Map<u64, u64>>(
     keys: &[u64],
     miss_keys: &[u64],
     trials: usize,
+    warmup_passes: usize,
 ) {
     let mut map = M::new();
     let mut prev_n = 0;
@@ -388,6 +422,15 @@ fn sweep_lookup_miss<M: Map<u64, u64>>(
         });
 
         let total_ops = ops * repeats;
+        for _ in 0..warmup_passes {
+            let mut count = 0u64;
+            for i in 0..total_ops {
+                if map.get(&miss_keys[i % miss_keys.len()]).is_some() {
+                    count += 1;
+                }
+            }
+            black_box(count);
+        }
         let mut samples = Vec::with_capacity(trials);
         for _ in 0..trials {
             let start = Instant::now();
@@ -408,9 +451,24 @@ fn sweep_lookup_miss<M: Map<u64, u64>>(
 
 /// Remove sweep: build table to size N, then remove a batch.
 /// Rebuilds per trial since remove is destructive.
-fn sweep_remove<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u64], trials: usize) {
+fn sweep_remove<M: Map<u64, u64>>(
+    design: &str,
+    points: &[usize],
+    keys: &[u64],
+    trials: usize,
+    warmup_passes: usize,
+) {
     for &n in points {
         let ops = n.min(50_000);
+        for _ in 0..warmup_passes {
+            let mut map = M::new();
+            for i in 0..n {
+                map.insert(keys[i], i as u64);
+            }
+            for i in 0..ops {
+                black_box(map.remove(&keys[i]));
+            }
+        }
         let mut samples = Vec::with_capacity(trials);
 
         for _ in 0..trials {
@@ -432,7 +490,13 @@ fn sweep_remove<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u64], 
 }
 
 /// Iteration sweep: grow table incrementally, measure full scan at each size.
-fn sweep_iterate<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u64], trials: usize) {
+fn sweep_iterate<M: Map<u64, u64>>(
+    design: &str,
+    points: &[usize],
+    keys: &[u64],
+    trials: usize,
+    warmup_passes: usize,
+) {
     let mut map = M::new();
     let mut prev_n = 0;
 
@@ -450,6 +514,16 @@ fn sweep_iterate<M: Map<u64, u64>>(design: &str, points: &[usize], keys: &[u64],
             }
             black_box(sum);
         });
+
+        for _ in 0..warmup_passes {
+            for _ in 0..repeats {
+                let mut sum = 0u64;
+                for (_, &v) in map.iter() {
+                    sum = sum.wrapping_add(v);
+                }
+                black_box(sum);
+            }
+        }
 
         let mut samples = Vec::with_capacity(trials);
         for _ in 0..trials {
@@ -592,10 +666,11 @@ fn main() {
     let miss_keys = make_miss_keys(100_000);
 
     eprintln!(
-        "Sweep benchmark: max_n={}, {} points, {} trials, set={:?}, width={:?}{}",
+        "Sweep benchmark: max_n={}, {} points, {} trials, {} warmup passes, set={:?}, width={:?}{}",
         config.max_n,
         points.len(),
         config.trials,
+        config.warmup_passes,
         config.design_set,
         config.width,
         match &config.filter_design {
@@ -610,7 +685,7 @@ fn main() {
         ($op_name:expr, $sweep_fn:ident, $($extra:expr),*) => {
             if config.filter_op.as_ref().is_none_or(|f| f.eq_ignore_ascii_case($op_name)) {
                 eprintln!("[{}]", $op_name);
-                for_each_design!(config, $sweep_fn, &points, &keys $(, $extra)*, config.trials);
+                for_each_design!(config, $sweep_fn, &points, &keys $(, $extra)*, config.trials, config.warmup_passes);
             }
         };
     }

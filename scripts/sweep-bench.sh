@@ -6,6 +6,7 @@
 #   ./scripts/sweep-bench.sh --max-n 1000000      # cap N range
 #   ./scripts/sweep-bench.sh --op insert          # one operation only
 #   ./scripts/sweep-bench.sh --design-set all     # full design matrix
+#   ./scripts/sweep-bench.sh --warmup-passes 2    # untimed per-N warmup passes
 #   ./scripts/sweep-bench.sh --plot-only          # re-plot from latest CSV
 #
 # Storage:
