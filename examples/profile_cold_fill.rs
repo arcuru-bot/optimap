@@ -4,8 +4,10 @@
 //! `design` is `tomb`, `hb`, or `all`; `case` is `allocation_only`,
 //! `warm_fill_only`, `cold_allocate_and_fill`, or `all`. Defaults run both
 //! designs and all cases at N=10K. `warm_fill_only` reuses a page-faulted
-//! allocation after `clear()`; the other cases time allocation only or
-//! allocation plus fill.
+//! allocation after `clear()`. `allocation_only` minimally inserts and then
+//! consumes one entry through a black-boxed map so its backing allocation is
+//! observably used rather than optimized away; cold fill measures allocation
+//! plus all N inserts.
 
 use optimap::Map;
 use optimap::matrix_types::HighTag128_TombMap;
@@ -85,9 +87,12 @@ fn measure(runs: usize, mut operation: impl FnMut() -> Duration) -> Duration {
 
 fn allocate_only<M: Map<u64, u64>>(n: usize) -> Duration {
     let start = Instant::now();
-    let map = M::with_capacity(n);
-    std::hint::black_box(map.capacity());
-    start.elapsed()
+    let mut map = M::with_capacity(n);
+    map.insert(0, 0);
+    let map = std::hint::black_box(map);
+    let elapsed = start.elapsed();
+    drop(map);
+    elapsed
 }
 
 fn cold_fill<M: Map<u64, u64>>(keys: &[u64]) -> Duration {
