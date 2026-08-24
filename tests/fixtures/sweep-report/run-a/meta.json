@@ -1,0 +1,1 @@
+{"git_sha":"fixture-sha","started":"2026-08-23T10:00:00Z","host":"fixture-host","governor":"performance","loadavg_start":"0.10 0.20 0.30","command":"cargo bench --bench sweep -- --max-n 1000"}

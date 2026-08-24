@@ -57,7 +57,7 @@ write_meta_once() {
     local meta="$RUN_DIR/meta.json"
     if [[ -f "$meta" ]]; then return; fi
 
-    local sha dirty branch host kernel governor rustc avx512 avx2
+    local sha dirty branch host kernel governor rustc avx512 avx2 load command
     sha=$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo "nogit")
     dirty=$(git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | wc -l)
     branch=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
@@ -67,6 +67,8 @@ write_meta_once() {
     rustc=$( ( cd "$PROJECT_DIR" && direnv exec . rustc --version ) 2>/dev/null || echo "unknown")
     avx2=$(grep -c avx2 /proc/cpuinfo | head -1)
     avx512=$(grep -c avx512f /proc/cpuinfo | head -1)
+    load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo "unknown")
+    command="cargo bench --bench sweep -- ${SWEEP_ARGS[*]:-}"
 
     cat >"$meta" <<EOF
 {
@@ -80,7 +82,9 @@ write_meta_once() {
   "git_dirty_files": $dirty,
   "cpu_avx2_cores":   $avx2,
   "cpu_avx512_cores": $avx512,
-  "rustflags": "${RUSTFLAGS:-}"
+  "rustflags": "${RUSTFLAGS:-}",
+  "loadavg_start": "$load",
+  "command": "$command"
 }
 EOF
 }
