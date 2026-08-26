@@ -41,11 +41,22 @@ def main():
 
     by_point = defaultdict(list)
     shas = set()
+    expected = None
     for path in args.inputs:
         sha, rows = load(path)
         shas.add(sha)
+        points = {}
         for operation, design, n, ns_per_op in rows:
-            by_point[(operation, design, n)].append(ns_per_op)
+            key = (operation, design, n)
+            if key in points:
+                raise ValueError(f"{path}: duplicate point {key}")
+            points[key] = ns_per_op
+        if expected is None:
+            expected = set(points)
+        elif set(points) != expected:
+            raise ValueError(f"{path}: point grid differs from {args.inputs[0]}")
+        for key, ns_per_op in points.items():
+            by_point[key].append(ns_per_op)
 
     if len(shas) != 1:
         raise ValueError(f"refusing to aggregate different git SHAs: {', '.join(sorted(shas))}")

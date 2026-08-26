@@ -19,3 +19,32 @@ grep -Fq 'shaded band is the minimum–maximum range' "$tmp/report.md"
 test -s "$tmp/report-assets/insert.svg"
 test -s "$tmp/report-assets/lookup_hit.svg"
 echo 'publish-sweep-report fixture smoke test: PASS'
+
+# Refuse a same-SHA run when its build provenance differs.
+bad="$tmp/bad"
+cp -r "$fixture/run-b" "$bad"
+python3 - "$bad/meta.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as source:
+    meta = json.load(source)
+meta["rustflags"] = "-C target-cpu=generic"
+with open(path, "w") as output:
+    json.dump(meta, output)
+PY
+if python3 "$project_dir/scripts/publish-sweep-report.py" "$tmp/bad.md" "$fixture/run-a" "$bad" 2>"$tmp/bad.err"; then
+    echo 'publisher accepted incomparable rustflags' >&2
+    exit 1
+fi
+grep -Fq 'rustflags differs' "$tmp/bad.err"
+
+# A generation failure must preserve the existing report and asset tree.
+echo sentinel >"$tmp/report.md"
+echo sentinel >"$tmp/report-assets/sentinel"
+if PUBLISH_SWEEP_FAIL_OPERATION=insert python3 "$project_dir/scripts/publish-sweep-report.py" "$tmp/report.md" "$fixture/run-a" "$fixture/run-b" 2>/dev/null; then
+    echo 'publisher failure control unexpectedly succeeded' >&2
+    exit 1
+fi
+grep -Fxq sentinel "$tmp/report.md"
+grep -Fxq sentinel "$tmp/report-assets/sentinel"
+echo 'publish-sweep-report hardening controls: PASS'

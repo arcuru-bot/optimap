@@ -310,14 +310,15 @@ fn sweep_insert<M: Map<u64, u64>>(
 
     for _trial in 0..trials {
         let mut map = M::new();
-        let mut warmup_map = M::new();
         let mut prev_n = 0;
         for (pi, &n) in points.iter().enumerate() {
             let batch = &keys[prev_n..n];
             for _ in 0..warmup_passes {
-                for (i, &k) in batch.iter().enumerate() {
-                    black_box(warmup_map.insert(k, (prev_n + i) as u64));
+                let mut warmup_map = M::new();
+                for (i, &k) in keys[..n].iter().enumerate() {
+                    black_box(warmup_map.insert(k, i as u64));
                 }
+                black_box(warmup_map);
             }
             let start = Instant::now();
             for (i, &k) in batch.iter().enumerate() {

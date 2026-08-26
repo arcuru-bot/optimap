@@ -15,6 +15,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import shutil
 from collections import defaultdict
 from pathlib import Path
@@ -38,14 +39,18 @@ def metadata(run):
     governor = raw.get("governor", raw.get("cpu_governor"))
     date = raw.get("started", raw.get("created"))
     command = raw.get("command", raw.get("bench"))
+    dirty = raw.get("git_dirty_files")
+    rustc = raw.get("rustc")
+    rustflags = raw.get("rustflags")
+    kernel = raw.get("kernel")
     args = run / "sweep.args"
     if args.exists():
         command = "cargo bench --bench sweep -- " + args.read_text().strip()
-    required = {"SHA": sha, "date": date, "host": host, "governor": governor, "command": command}
-    missing = [name for name, value in required.items() if not value]
+    required = {"SHA": sha, "date": date, "host": host, "governor": governor, "command": command, "git_dirty_files": dirty, "rustc": rustc, "rustflags": rustflags, "kernel": kernel}
+    missing = [name for name, value in required.items() if value is None or value == ""]
     if missing:
         fail(f"{path}: missing {', '.join(missing)}")
-    return {"sha": str(sha), "date": str(date), "host": str(host), "governor": str(governor), "command": str(command), "load": str(raw.get("loadavg_start", "not recorded"))}
+    return {"sha": str(sha), "date": str(date), "host": str(host), "governor": str(governor), "command": str(command), "dirty": str(dirty), "rustc": str(rustc), "rustflags": str(rustflags), "kernel": str(kernel), "load": str(raw.get("loadavg_start", "not recorded"))}
 
 
 def load_run(run):
@@ -76,6 +81,8 @@ def color(index):
 
 
 def write_svg(path, operation, data):
+    if os.environ.get("PUBLISH_SWEEP_FAIL_OPERATION") == operation:
+        raise RuntimeError(f"injected failure for {operation}")
     designs = sorted({design for op, design, _ in data if op == operation})
     ns = sorted({n for op, _, n in data if op == operation})
     values = [value for (op, _, _), samples in data.items() if op == operation for value in samples]
@@ -130,7 +137,7 @@ def main():
 
     loaded = [load_run(run) for run in args.runs]
     infos, point_sets = zip(*loaded)
-    for field in ("sha", "host", "governor", "command"):
+    for field in ("sha", "host", "governor", "command", "dirty", "rustc", "rustflags", "kernel"):
         values = {info[field] for info in infos}
         if len(values) != 1:
             fail(f"refusing incomparable runs: {field} differs: {', '.join(sorted(values))}")
@@ -145,13 +152,18 @@ def main():
             data[key].append(value)
     output = args.output
     assets = output.with_name(output.stem + "-assets")
-    if assets.exists():
-        shutil.rmtree(assets)
-    assets.mkdir(parents=True)
     output.parent.mkdir(parents=True, exist_ok=True)
+    staged = output.parent / f".{assets.name}.tmp"
+    if staged.exists():
+        shutil.rmtree(staged)
+    staged.mkdir(parents=True)
     operations = sorted({op for op, _, _ in data})
-    for operation in operations:
-        write_svg(assets / f"{operation}.svg", operation, data)
+    try:
+        for operation in operations:
+            write_svg(staged / f"{operation}.svg", operation, data)
+    except BaseException:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
 
     largest_n = max(n for _, _, n in data)
     designs = sorted({design for _, design, _ in data})
@@ -166,7 +178,12 @@ def main():
             ratio = "—" if baseline is None else f"{median(samples) / baseline:.2f}x"
             lines.append(f"| {design} | {point} | {ratio} |")
         lines.extend(["", f"![{operation} curve]({assets.name}/{operation}.svg)", ""])
-    output.write_text("\n".join(lines))
+    staged_output = output.with_name(f".{output.name}.tmp")
+    staged_output.write_text("\n".join(lines))
+    if assets.exists():
+        shutil.rmtree(assets)
+    staged.rename(assets)
+    staged_output.replace(output)
     print(f"published {len(args.runs)} comparable runs ({infos[0]['sha']}) to {output}")
 
 
