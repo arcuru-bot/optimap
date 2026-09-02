@@ -35,8 +35,8 @@ type SeedBuilder = fn(
 ) -> Result<Vec<u32>, BuildError>;
 
 #[inline]
-fn boxed_slice_bytes<T>(b: &Box<[T]>) -> usize {
-    b.len() * std::mem::size_of::<T>()
+fn boxed_slice_bytes<T>(b: &[T]) -> usize {
+    std::mem::size_of_val(b)
 }
 
 /// Default average bucket size. CHD's theoretical lower bound is around

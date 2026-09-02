@@ -61,7 +61,7 @@ fn compute_segment_length(n: usize) -> u32 {
     }
     let total_needed = ((1.23 * n as f64).floor() as usize) + 32;
     let total = total_needed + 2;
-    let seg = (total / 3) + if total % 3 != 0 { 1 } else { 0 };
+    let seg = (total / 3) + if !total.is_multiple_of(3) { 1 } else { 0 };
     seg.next_power_of_two() as u32
 }
 
@@ -174,8 +174,7 @@ impl BinaryFuse8 {
             xor_sums[h2[i]] ^= i;
 
             // Check each of the 3 positions for newly-singleton keys.
-            for p in 0..3 {
-                let pos = positions[p];
+            for &pos in &positions {
                 if counts[pos] == 1 {
                     let remaining = xor_sums[pos];
                     if !peeled[remaining] {
@@ -234,6 +233,12 @@ impl BinaryFuse8 {
     /// Number of keys in the filter.
     pub fn len(&self) -> usize {
         self.n
+    }
+
+    /// Whether the filter contains no keys.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
     }
 
     /// Number of heap bytes used by the fingerprint array.
@@ -427,6 +432,12 @@ impl Xor8 {
     /// Number of keys in the filter.
     pub fn len(&self) -> usize {
         self.n
+    }
+
+    /// Whether the filter contains no keys.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
     }
 
     /// Number of heap bytes used by the fingerprint array.

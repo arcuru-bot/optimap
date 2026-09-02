@@ -92,7 +92,7 @@ impl PtHashPhf {
         let bits_per_disp = if m <= 1 {
             2u32
         } else {
-            (usize::BITS - m.leading_zeros()) as u32 + 1
+            (usize::BITS - m.leading_zeros()) + 1
         };
 
         // r = ceil(n / λ), at least 1

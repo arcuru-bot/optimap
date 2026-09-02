@@ -106,7 +106,7 @@ fn build_map_single(
 ) -> Result<(PerfectMapBucketed<u64, u64, RandomState>, f64), BuildError> {
     let config = BucketedConfig::default().with_lambda(lambda);
     let start = Instant::now();
-    let map = PerfectMapBucketed::from_entries(entries, hash_builder.clone(), &config)?;
+    let map = PerfectMapBucketed::from_entries(entries, *hash_builder, &config)?;
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
     Ok((map, elapsed))
 }
@@ -121,7 +121,7 @@ fn build_map_multi(
         .with_lambda_0(lambda_0)
         .with_lambda_1(lambda_1);
     let start = Instant::now();
-    let map = PerfectMapMultilevelBucketed::from_entries(entries, hash_builder.clone(), &config)?;
+    let map = PerfectMapMultilevelBucketed::from_entries(entries, *hash_builder, &config)?;
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
     Ok((map, elapsed))
 }
@@ -580,7 +580,7 @@ fn recommend(rows_single: &[Row], rows_multi: &[Row]) {
         let s = single_safe_at[i].1;
         let m = multi_safe_at[i].1;
         let s_str = if s == 4.0 {
-            format!("≤4 (default)")
+            "≤4 (default)".to_string()
         } else {
             format!("{:.0}", s)
         };
