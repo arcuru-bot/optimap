@@ -4,10 +4,14 @@
 //!
 //! | Filter | Construction | Best at |
 //! |--------|:------------:|---------|
-//! | [`BinaryFuse8`] | Peel-queue (O(n)) | Fast build, ~9 bits/key |
+//! | [`BinaryFuse8`] | Peel-queue (O(n)) | Fast build; footprint varies with segment rounding |
 //! | [`Xor8`] | Sorted-peel (O(n log n)) | Same output, simpler retry |
 //!
 //! Keys are pre-hashed `u64` values; hashing is the caller's responsibility.
+//! Input hashes must be unique: duplicate hashes are rejected, and distinct
+//! original keys that collide to the same `u64` cannot be represented
+//! separately. A built filter has no false negatives for submitted hashes,
+//! but may return false positives for hashes that were not submitted.
 //! Internal position mapping uses splitmix64 mixing with per-segment seeds.
 //!
 //! ## Quick start
@@ -59,15 +63,41 @@ fn compute_segment_length(n: usize) -> u32 {
     if n == 0 {
         return 0;
     }
-    let total_needed = ((1.23 * n as f64).floor() as usize) + 32;
-    let total = total_needed + 2;
-    let seg = (total / 3) + if !total.is_multiple_of(3) { 1 } else { 0 };
-    seg.next_power_of_two() as u32
+    let total_needed = ((1.23 * n as f64).floor() as usize)
+        .checked_add(32)
+        .expect("filter sizing overflow before allocation");
+    let total = total_needed
+        .checked_add(2)
+        .expect("filter sizing overflow before allocation");
+    let seg = total.div_ceil(3);
+    let segment_length = seg
+        .checked_next_power_of_two()
+        .expect("filter segment length overflows usize before allocation");
+    u32::try_from(segment_length).expect("filter segment length exceeds u32::MAX before allocation")
+}
+
+fn fingerprint_array_length(segment_length: u32) -> usize {
+    (segment_length as usize)
+        .checked_mul(3)
+        .expect("filter fingerprint array length overflows usize before allocation")
+}
+
+fn assert_unique_hashes(hashes: &[u64]) {
+    let mut sorted = hashes.to_vec();
+    sorted.sort_unstable();
+    assert!(
+        !sorted.windows(2).any(|pair| pair[0] == pair[1]),
+        "filter input contains duplicate u64 hashes"
+    );
 }
 
 // ── BinaryFuse8 ───────────────────────────────────────────────────────────
 
-/// A Graf-Lemire BinaryFuse8 filter: ~9 bits/key, O(n) construction via peel-queue.
+/// A three-segment 8-bit XOR filter built via a peel queue.
+///
+/// The power-of-two segment rounding trades simple position masking for a
+/// size-dependent footprint; use [`bits_per_key`](Self::bits_per_key) for
+/// the actual allocation rather than assuming the Binary Fuse paper's density.
 #[derive(Clone)]
 pub struct BinaryFuse8 {
     fingerprints: Box<[u8]>,
@@ -77,8 +107,12 @@ pub struct BinaryFuse8 {
 }
 
 impl BinaryFuse8 {
-    /// Build from pre-hashed keys. Retries with different seeds if construction fails.
+    /// Build from unique pre-hashed keys. Retries with different seeds if construction fails.
+    ///
+    /// Submitted hashes never produce false negatives; other hashes can produce
+    /// false positives. Duplicate hashes panic because they cannot be represented.
     pub fn build(hashes: &[u64]) -> Self {
+        assert_unique_hashes(hashes);
         for seed in 0u64.. {
             if let Some(filter) = Self::try_build_with_seed(hashes, seed) {
                 return filter;
@@ -99,9 +133,9 @@ impl BinaryFuse8 {
         }
 
         let sl = compute_segment_length(n);
-        let array_len = 3 * sl as usize;
+        let array_len = fingerprint_array_length(sl);
 
-        let mut counts = vec![0u16; array_len];
+        let mut counts = vec![0u32; array_len];
         let mut xor_sums: Vec<usize> = vec![0; array_len];
 
         // Pre-compute all positions.
@@ -214,7 +248,9 @@ impl BinaryFuse8 {
         })
     }
 
-    /// Check if the filter probably contains the given hash.
+    /// Check whether the filter probably contains the hash.
+    ///
+    /// Submitted hashes always return true. Hashes not submitted may also return true.
     #[inline]
     pub fn contains(&self, hash: u64) -> bool {
         if self.n == 0 {
@@ -279,8 +315,12 @@ pub struct Xor8 {
 }
 
 impl Xor8 {
-    /// Build from pre-hashed keys. Retries with different seeds if construction fails.
+    /// Build from unique pre-hashed keys. Retries with different seeds if construction fails.
+    ///
+    /// Submitted hashes never produce false negatives; other hashes can produce
+    /// false positives. Duplicate hashes panic because they cannot be represented.
     pub fn build(hashes: &[u64]) -> Self {
+        assert_unique_hashes(hashes);
         for seed in 0u64.. {
             if let Some(filter) = Self::try_build_with_seed(hashes, seed) {
                 return filter;
@@ -301,9 +341,9 @@ impl Xor8 {
         }
 
         let sl = compute_segment_length(n);
-        let array_len = 3 * sl as usize;
+        let array_len = fingerprint_array_length(sl);
 
-        let mut counts = vec![0u16; array_len];
+        let mut counts = vec![0u32; array_len];
         let mut xor_sums: Vec<usize> = vec![0; array_len];
 
         let mut h0 = vec![0usize; n];
@@ -413,7 +453,9 @@ impl Xor8 {
         })
     }
 
-    /// Check if the filter probably contains the given hash.
+    /// Check whether the filter probably contains the hash.
+    ///
+    /// Submitted hashes always return true. Hashes not submitted may also return true.
     #[inline]
     pub fn contains(&self, hash: u64) -> bool {
         if self.n == 0 {
@@ -561,9 +603,28 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "duplicate u64 hashes")]
+    fn duplicate_hashes_bf8_fail_fast() {
+        BinaryFuse8::build(&[7, 7]);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate u64 hashes")]
+    fn duplicate_hashes_xor8_fail_fast() {
+        Xor8::build(&[7, 7]);
+    }
+
+    #[test]
+    #[should_panic(expected = "filter sizing overflow before allocation")]
+    fn oversized_segment_length_fails_before_allocation() {
+        compute_segment_length(usize::MAX);
+    }
+
+    #[test]
     fn empty_filter_bf8() {
         let filter = BinaryFuse8::build(&[]);
         assert_eq!(filter.len(), 0);
+        assert!(filter.is_empty());
         assert_eq!(filter.bits_per_key(), 0.0);
         assert!(!filter.contains(42));
         assert!(!filter.contains(0));
@@ -574,6 +635,7 @@ mod tests {
     fn empty_filter_xor8() {
         let filter = Xor8::build(&[]);
         assert_eq!(filter.len(), 0);
+        assert!(filter.is_empty());
         assert_eq!(filter.bits_per_key(), 0.0);
         assert!(!filter.contains(42));
         assert!(!filter.contains(0));

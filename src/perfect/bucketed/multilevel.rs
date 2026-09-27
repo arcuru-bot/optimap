@@ -275,15 +275,9 @@ impl MultilevelBucketedPhf {
         (level_0_bits + overflow_bits + level_1_bits) / n as f64
     }
 
-    /// Heap bytes owned by the PHF (overflow bitset + inline level-0/level-1 structs).
+    /// Heap bytes owned by the PHF (the overflow bitset).
     pub fn bytes_on_heap(&self) -> usize {
         self.overflow.len() * std::mem::size_of::<u64>()
-            + std::mem::size_of::<BucketedPhf>() // level_0
-            + if self.level_1.is_some() {
-                std::mem::size_of::<BucketedPhf>()
-            } else {
-                0
-            }
     }
 }
 

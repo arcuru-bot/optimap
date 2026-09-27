@@ -354,40 +354,40 @@ The `PerfectHashFunction` trait is the slot — each algorithm is a new
 `impl` selected via the `P` type parameter on `PerfectMap` /
 `PerfectMapSparse` / `PerfectMapUnchecked` / `PerfectSet`.
 
-#### PTHash impl of `PerfectHashFunction` — SHIPPED (fixed-width), compact encoding deferred
+#### Packed CHD impl of `PerfectHashFunction` — SHIPPED
 
-`PtHashPhf` (Pibiri-Trani 2021) is implemented in `src/perfect/pthash.rs`
-and plugs into `PerfectMap` / `PerfectMapUnchecked` / `PerfectSet` /
-`PerfectMapSparse` via the `PerfectHashFunction` trait. Two-level bucketed
-displacement search (λ = 4), displacements **bit-packed at a fixed width**
-`ceil(log₂ m) + 1`. Covered by `benches/perfect.rs` (construction / hit /
-miss) and `benches/perfect_memory.rs`.
+`PackedChdPhf` is implemented in `src/perfect/packed_chd.rs` and plugs
+into `PerfectMap` / `PerfectMapUnchecked` / `PerfectSet` /
+`PerfectMapSparse` through the `PerfectHashFunction` trait. It is a
+CHD-style largest-bucket-first linear displacement search at λ = 4, with
+displacements **bit-packed at a fixed width** `ceil(log₂ m) + 1`. It does
+not implement PTHash's pilot/XOR search or compact pilot encoding; the
+separate `ChdPhf::build_with_profile_pilot` experiment below implements the
+pilot search. Covered by `benches/perfect.rs` (construction / hit / miss)
+and `benches/perfect_memory.rs`.
 
-**What did NOT happen: the memory win.** The headline "~30 % smaller,
-~2.4 bits/key" from the paper comes from Elias-Fano / dictionary-encoding
-the pilot table. That encoding is deliberately *not* implemented — the
-fixed-width table lands at **~5.3 bits/key at 1M vs CHD's ~6.4** (0.66 vs
-0.80 bytes/key of PHF). That's ~17 % off the PHF, but the slot array (8
-B/key for u64 values) dominates the map, so total memory moves ~2 % on the
-stored map, ~4 % on `Unchecked` — noise. The paper's bits/key is only a
-headline number for the PHF held *standalone*.
+The fixed-width table is about 0.66 B/key at 1M versus `ChdPhf`'s about
+0.80 B/key. For `u64 → u64`, that changes stored-map layout accounting
+from roughly 16.80 to 16.66 B/key (16 B for `(K, V)` plus the PHF); for
+`PerfectMapUnchecked`, it changes from roughly 8.80 to 8.66 B/key (8 B for
+`V` plus the PHF). These are storage-layout calculations, not
+allocator-backed footprint measurements, so they are not comparable to a
+mutable map's allocation footprint.
 
-**What DID happen: build speed.** λ = 4 + the +1-bit displacement headroom
-converge much faster than CHD's λ = 5 linear walk: **~2.6–3× faster
-construction** (2.1 ms vs 6.7 ms at 10K, 26 ms vs 69 ms at 100K), same
-lookup shape as CHD. So `PtHashPhf` ships as the **fast-build CHD
-alternative**, not a smaller one.
+At λ = 4, smaller buckets plus the extra displacement-width bit converge
+much faster than `ChdPhf`'s default λ = 5 search: **~2.6–3× faster
+construction** (2.1 ms vs 6.7 ms at 10K, 26 ms vs 69 ms at 100K), with the
+same lookup shape. `PackedChdPhf` therefore ships as the **fast-build,
+fixed-width CHD alternative**, not as a PTHash implementation.
 
-**Deferred — the compact encoding.** Reaching the paper's ~2.4 bits/key
-means Elias-Fano or dictionary-encoding the displacements. Analysis (see
-below) says it is *not* a clean win: every scheme that hits the target
-adds decode work or an indirection to the `index()` hot path, in exchange
-for a ~4 % total-map memory saving. The one same-speed variant —
-right-sizing the global width to the actual max displacement instead of
-`ceil(log₂ m)+1` — is defeated at minimal `m`, where the long tail pushes
-max-d back near `log₂(m)` (why the `+1` headroom exists). Only worth
-building for a workload that holds the PHF standalone with memory as the
-binding constraint; measure the actual minimal-`m` max displacement first.
+**Deferred — compact encoding.** Compressing the displacement table would
+add decode work or an indirection to the `index()` hot path in exchange for
+a small total-map layout saving. The same-speed option — right-sizing the
+global width to the actual maximum displacement — is defeated at minimal
+`m`, where the long tail pushes max-d near `log₂(m)` and requires the extra
+headroom. Only pursue this for a workload that holds the PHF standalone
+with memory as the binding constraint; measure the actual minimal-`m`
+maximum displacement first.
 
 #### BBHash impl of `PerfectHashFunction`
 
@@ -495,12 +495,14 @@ total bits when composed with `PerfectMapUnchecked`. Useful in its own
 right for cache front-ends, dedup pipelines, hash-join probe sides.
 
 Not perfect-hash, but adjacent enough to live in-crate rather than as a
-separate dep. Binary Fuse (Graf-Lemire 2022) is the modern default:
-~9 bits/key at ~1/256 FPR, fast build, three hashes per query. Xor8 is
-a close second and simpler to implement. Both are build-once read-only,
-so they share the lifecycle model with `src/perfect/` even though they
-answer membership-with-FPR rather than perfect mapping. Composition
-pattern: `if filter.contains(k) { map.get_unchecked(k) } else { None }`
+separate dep. The shipped `BinaryFuse8` and `Xor8` implementations are
+three-segment, 8-bit XOR filters sharing a Graf-Lemire-style segmented
+layout; `BinaryFuse8` uses a peel queue and `Xor8` a sorted peel. Their
+power-of-two segment rounding makes storage size-dependent; use
+`bits_per_key()` for the actual allocation. Both are build-once read-only, so they
+share the lifecycle model with `src/perfect/` even though they answer
+membership-with-FPR rather than perfect mapping. Composition pattern:
+`if filter.contains(k) { map.get_unchecked(k) } else { None }`
 — the filter rejects negatives before touching the value array, and the
 unchecked map carries zero key-storage overhead.
 
@@ -620,9 +622,9 @@ search is kept as a tested alternative (`build_with_profile_pilot`) for
 the small build-time win, but it is *not* the largest algorithmic lever
 this entry claimed.
 
-Note: the shipped `PtHashPhf` (see above) does *not* implement this —
-it uses a plain linear `d` walk like CHD, and gets its build-speed win
-purely from the smaller λ = 4 buckets.
+`PackedChdPhf` (see above) does *not* implement this: it uses a plain
+linear `d` walk like CHD and gets its build-speed win from the smaller
+λ = 4 buckets.
 
 #### ~~Tunable `λ` (avg bucket size)~~ **SHIPPED**
 
@@ -648,7 +650,7 @@ wall-clock) are the signal. The existing `build`, `build_with_profile` and
 `ChdPhf` now stores its λ so `bits_per_key` reports the actual `~32/λ`
 rather than assuming the default. Shape note: the "build-time const or
 `ChdConfig`" question settled on the runtime build parameter that
-`PtHashPhf::build_with_lambda` already established in this family — no const
+`PackedChdPhf::build_with_lambda` already established in this family — no const
 generic, no config struct. The `PerfectMap` / `PerfectMapSparse` wrappers
 still build at the default λ; at that level the higher-leverage build knob
 remains `PerfectMapSparse`'s `load_factor` (slack `m/n > 1` collapses

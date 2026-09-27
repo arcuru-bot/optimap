@@ -1,16 +1,22 @@
-//! Memory-footprint table for the perfect-hash family.
+//! Storage-accounting table for the perfect-hash family.
 //!
-//! Prints a table of `bytes_used()` for each perfect-hash variant at
-//! N ∈ {10K, 100K, 1M}, alongside hashbrown and `HighTag128_TombMap`
-//! approximations. All u64 → u64 (or u64-only for sets).
+//! Prints each perfect-hash variant's `bytes_used()` accounting at
+//! N ∈ {10K, 100K, 1M}. The mutable-map row is a layout estimate, not an
+//! allocator-backed footprint measurement; hashbrown's bucket count is not
+//! exposed by its public API, so it is reported as unavailable. All u64 → u64
+//! (or u64-only for sets).
 
 mod bench_helpers;
 
 use bench_helpers::make_random_keys;
 use criterion::{Criterion, criterion_group, criterion_main};
+#[cfg(feature = "hasher-ahash")]
+type BenchHasher = ahash::RandomState;
+#[cfg(not(feature = "hasher-ahash"))]
+type BenchHasher = foldhash::fast::RandomState;
 
 use optimap::matrix_types::HighTag128_TombMap;
-use optimap::perfect::{PerfectMapConfig, PtHashPhf};
+use optimap::perfect::{PackedChdPhf, PerfectMapConfig};
 use optimap::{
     PerfectMap, PerfectMapBucketed, PerfectMapMultilevelBucketed, PerfectMapSparse,
     PerfectMapUnchecked, PerfectSet, PerfectSetBucketed, PerfectSetMultilevelBucketed,
@@ -58,60 +64,51 @@ fn print_memory_table(n: usize) {
         PerfectSetMultilevelBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
     let psml_bytes = psml.bytes_used();
 
-    // ── PTHash-backed variants ────────────────────────────────────────
+    // ── Packed-CHD-backed variants ────────────────────────────────────────
 
-    // PerfectMap (dense minimal, PTHash)
-    let pm_pt = PerfectMap::<u64, u64, PtHashPhf>::from_entries(
+    // PerfectMap (dense minimal, packed CHD)
+    let pm_packed =
+        PerfectMap::<u64, u64, PackedChdPhf>::from_entries(entries.clone(), BenchHasher::default())
+            .unwrap();
+    let pm_packed_bytes = pm_packed.bytes_used();
+
+    // PerfectMapUnchecked (packed CHD)
+    let pmu_packed = PerfectMapUnchecked::<u64, u64, PackedChdPhf>::from_entries(
         entries.clone(),
-        foldhash::fast::RandomState::default(),
+        BenchHasher::default(),
     )
     .unwrap();
-    let pm_pt_bytes = pm_pt.bytes_used();
+    let pmu_packed_bytes = pmu_packed.bytes_used();
 
-    // PerfectMapUnchecked (PTHash)
-    let pmu_pt = PerfectMapUnchecked::<u64, u64, PtHashPhf>::from_entries(
-        entries.clone(),
-        foldhash::fast::RandomState::default(),
-    )
-    .unwrap();
-    let pmu_pt_bytes = pmu_pt.bytes_used();
+    // PerfectSet (packed CHD)
+    let ps_packed =
+        PerfectSet::<u64, PackedChdPhf>::from_keys(keys.clone(), BenchHasher::default()).unwrap();
+    let ps_packed_bytes = ps_packed.bytes_used();
 
-    // PerfectSet (PTHash)
-    let ps_pt = PerfectSet::<u64, PtHashPhf>::from_keys(
-        keys.clone(),
-        foldhash::fast::RandomState::default(),
-    )
-    .unwrap();
-    let ps_pt_bytes = ps_pt.bytes_used();
-
-    // PerfectMapSparse (PTHash, load_factor=1.50 — non-minimal, generous slack)
+    // PerfectMapSparse (packed CHD, load_factor=1.50 — non-minimal, generous slack)
     let config = PerfectMapConfig::default().with_load_factor(1.50);
-    let pms_pt = PerfectMapSparse::<u64, u64, PtHashPhf>::from_entries_with(
+    let pms_packed = PerfectMapSparse::<u64, u64, PackedChdPhf>::from_entries_with(
         entries.clone(),
-        foldhash::fast::RandomState::default(),
+        BenchHasher::default(),
         &config,
     )
     .unwrap();
-    let pms_pt_bytes = pms_pt.bytes_used();
+    let pms_packed_bytes = pms_packed.bytes_used();
 
     // ── Mutable hash maps ──────────────────────────────────────────────
-
-    // hashbrown
-    let mut hb: hashbrown::HashMap<u64, u64> = entries.iter().copied().collect();
-    hb.shrink_to_fit();
-    let hb_bytes = hb.capacity() * std::mem::size_of::<(u64, u64)>();
 
     // HighTag128_TombMap
     let mut tomb = HighTag128_TombMap::<u64, u64>::with_capacity(n);
     for &(k, v) in &entries {
         tomb.insert(k, v);
     }
-    let tomb_bytes = tomb.capacity() * std::mem::size_of::<(u64, u64)>();
+    // Layout estimate: one metadata byte per reported capacity slot; excludes allocator overhead.
+    let tomb_bytes = tomb.capacity() * (std::mem::size_of::<(u64, u64)>() + 1);
 
     // ── Print table ────────────────────────────────────────────────────
 
     println!();
-    println!("=== Perfect Hash Memory Footprint (u64→u64) ===");
+    println!("=== Perfect Hash Storage Accounting (u64→u64) ===");
     println!("N={n}");
     println!(
         "  PerfectMap                    :  total={pm_bytes:>12} bytes,  bytes/key={:.2}",
@@ -146,27 +143,26 @@ fn print_memory_table(n: usize) {
         psml_bytes as f64 / n as f64
     );
     println!(
-        "  PerfectMap (PTHash)           :  total={pm_pt_bytes:>12} bytes,  bytes/key={:.2}",
-        pm_pt_bytes as f64 / n as f64
+        "  PerfectMap (packed CHD)           :  total={pm_packed_bytes:>12} bytes,  bytes/key={:.2}",
+        pm_packed_bytes as f64 / n as f64
     );
     println!(
-        "  PerfectMapUnchecked (PTHash)  :  total={pmu_pt_bytes:>12} bytes,  bytes/key={:.2}",
-        pmu_pt_bytes as f64 / n as f64
+        "  PerfectMapUnchecked (packed CHD)  :  total={pmu_packed_bytes:>12} bytes,  bytes/key={:.2}",
+        pmu_packed_bytes as f64 / n as f64
     );
     println!(
-        "  PerfectSet (PTHash)           :  total={ps_pt_bytes:>12} bytes,  bytes/key={:.2}",
-        ps_pt_bytes as f64 / n as f64
+        "  PerfectSet (packed CHD)           :  total={ps_packed_bytes:>12} bytes,  bytes/key={:.2}",
+        ps_packed_bytes as f64 / n as f64
     );
     println!(
-        "  PerfectMapSparse (PTHash)     :  total={pms_pt_bytes:>12} bytes,  bytes/key={:.2}",
-        pms_pt_bytes as f64 / n as f64
+        "  PerfectMapSparse (packed CHD)     :  total={pms_packed_bytes:>12} bytes,  bytes/key={:.2}",
+        pms_packed_bytes as f64 / n as f64
     );
     println!(
-        "  hashbrown                     :  total={hb_bytes:>12} bytes,  bytes/key={:.2}",
-        hb_bytes as f64 / n as f64
+        "  hashbrown                     :  layout estimate unavailable (bucket count is not public API)"
     );
     println!(
-        "  HighTag128_Tomb               :  total={tomb_bytes:>12} bytes,  bytes/key={:.2}",
+        "  HighTag128_Tomb (layout est.) :  total={tomb_bytes:>12} bytes,  bytes/key={:.2}",
         tomb_bytes as f64 / n as f64
     );
 }

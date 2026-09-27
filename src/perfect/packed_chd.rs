@@ -1,55 +1,43 @@
-//! PTHash perfect-hash construction (Pibiri & Trani 2021).
+//! Fixed-width packed CHD-style perfect-hash construction.
 //!
-//! Two-level: partition n hashes into r = ceil(n/λ) buckets via a primary
-//! hash, sort buckets largest-first, and for each bucket search for a
-//! per-bucket displacement `d` that resolves all keys in the bucket to
-//! distinct empty slots.
+//! Hashes are partitioned into `r = ceil(n / λ)` buckets, the buckets are
+//! processed largest-first, and each bucket receives the first linear
+//! displacement `d` that maps all of its keys to distinct empty slots.
+//! Lookup reads that displacement from a fixed-width packed table and uses
+//! the same mixed-displacement slot function as [`super::ChdPhf`].
 //!
-//! **What this impl does and does not do.** Displacements are bit-packed
-//! into a dense u64 array at a *fixed* width `b = ceil(log₂(m)) + 1`
-//! (stored in ceil(r·b / 64) u64 words). This is *not* the compact
-//! encoding from the PTHash paper: the paper's ~2.4 bits/key comes from
-//! Elias-Fano / dictionary-compressing the pilot table to exploit the
-//! skewed displacement distribution, which is deliberately left
-//! unimplemented. At fixed width the table lands at ~5.3 bits/key at
-//! N = 1M (vs CHD's ~6.4) — a ~17 % PHF saving that barely moves total
-//! map memory, since the slot array dominates (8 B/key for u64 values).
+//! This is deliberately named for the algorithm it implements. It is not
+//! PTHash: it has neither PTHash's pilot/XOR search nor its compact pilot
+//! encoding. The separate [`super::ChdPhf::build_with_profile_pilot`]
+//! experiment implements the pilot search.
 //!
-//! **Where it actually wins: build speed.** At λ = 4 with the +1-bit
-//! displacement headroom, the per-bucket search converges far faster
-//! than CHD's λ = 5 linear walk — ~2.6–3× faster construction (2.1 ms
-//! vs 6.7 ms at N = 10K, 26 ms vs 69 ms at N = 100K), with the same
-//! lookup shape as CHD. Treat `PtHashPhf` as the fast-build CHD
-//! alternative, not a smaller one. Chase the compact encoding only if a
-//! workload holds the PHF standalone with memory as the hard constraint.
-//!
-//! Lookup: bucket = bucket_of(hash, seed, r), extract d from packed table,
-//! slot = mixed_slot(hash, seed, d, m).
+//! At the default `λ = 4`, smaller buckets make construction roughly
+//! 2.6–3× faster than the default `ChdPhf` configuration measured for this
+//! branch. The fixed-width table uses about 5.3 bits/key at one million
+//! keys versus about 6.4 bits/key for `ChdPhf`; the slot array still
+//! dominates total map memory.
 
 use super::phf::{BuildError, PerfectHashFunction};
 use super::util::{bucket_of, has_duplicate, mix};
 
-/// Default average bucket size. Lower bound for M = 2 for minimal PHFs;
-/// λ = 4 is the same default as the CHD family for comparable bucket
-/// counts. λ = 4 (vs CHD's 5) is what buys the faster build — smaller
-/// buckets resolve their displacement in fewer attempts. It does not
-/// buy compactness: at the fixed displacement width this lands near
-/// ~5.3 bits/key at 1M (see the module docs), not the paper's ~2.4.
+/// Default average bucket size.
+///
+/// `λ = 4` (versus [`super::ChdPhf`]'s default 5) trades a larger packed
+/// displacement table for smaller buckets and fewer construction attempts.
 const DEFAULT_LAMBDA: usize = 4;
 
 /// How many independent seed families to try before giving up.
-const MAX_SEED_RETRIES: u32 = 64;
+const MAX_SEED_RETRIES: u32 = 1024;
 
 /// Splitmix64-style starting seed, distinct from CHD's.
 const SEED_BASE: u64 = 0xD6E8FEB86659FD93;
 
-/// Per-bucket displacement search ceiling. Same cap as CHD but PTHash
-/// typically finds d much faster because buckets are smaller (λ = 4).
+/// Per-bucket displacement search ceiling.
 const MAX_DISPLACEMENT: u64 = 1 << 24;
 
-/// PTHash perfect hash function — fixed-width bit-packed displacement table.
+/// CHD-style perfect hash function with fixed-width packed displacements.
 #[derive(Debug, Clone)]
-pub struct PtHashPhf {
+pub struct PackedChdPhf {
     seed: u64,
     /// Bit-packed per-bucket displacements. `ceil(r * bits_per_disp / 64)` u64 words.
     displacements: Box<[u64]>,
@@ -57,11 +45,13 @@ pub struct PtHashPhf {
     bits_per_disp: u32,
     /// Number of buckets `r`.
     num_buckets: u32,
+    /// Number of hashes used to build this PHF.
+    num_keys: u32,
     /// Table size `m` (slot domain).
     m: u32,
 }
 
-impl PtHashPhf {
+impl PackedChdPhf {
     /// Build with a custom average bucket load λ. `lambda` must be > 0.
     /// Lower λ → larger displacement table (more buckets) but easier
     /// construction. Higher λ → more compact table but harder per-bucket
@@ -72,31 +62,30 @@ impl PtHashPhf {
         assert!(m >= n, "PHF table size m={m} must be >= key count n={n}");
         assert!(
             m <= u32::MAX as usize,
-            "PtHashPhf does not support tables larger than u32::MAX slots"
+            "PackedChdPhf does not support tables larger than u32::MAX slots"
         );
+        if has_duplicate(hashes) {
+            return Err(BuildError::DuplicateHash);
+        }
 
         if n == 0 {
-            return Ok(PtHashPhf {
+            return Ok(PackedChdPhf {
                 seed: 0,
                 displacements: Box::new([]),
                 bits_per_disp: 1,
                 num_buckets: 0,
+                num_keys: 0,
                 m: m as u32,
             });
         }
 
-        // bits_per_disp = ceil(log2(m)) + 1, at least 2.
-        // +1 gives the displacement search twice the range, matching the
-        // PTHash paper's recommendation. Without it, minimal builds fail
-        // at modest N because the displacement space is too tight.
-        let bits_per_disp = if m <= 1 {
-            2u32
-        } else {
-            (usize::BITS - m.leading_zeros()) + 1
-        };
+        // bits_per_disp = ceil(log2(m)) + 1. The extra bit gives the
+        // displacement search twice the range; without it, minimal builds
+        // fail at modest N because the displacement space is too tight.
+        let bits_per_disp = displacement_width(m);
 
         // r = ceil(n / λ), at least 1
-        let r = ((n + lambda - 1) / lambda).max(1);
+        let r = n.div_ceil(lambda).max(1);
 
         let mut build_disp = None;
         let mut final_seed = SEED_BASE;
@@ -114,11 +103,12 @@ impl PtHashPhf {
         }
 
         match build_disp {
-            Some(displacements) => Ok(PtHashPhf {
+            Some(displacements) => Ok(PackedChdPhf {
                 seed: final_seed,
                 displacements: displacements.into_boxed_slice(),
                 bits_per_disp,
                 num_buckets: r as u32,
+                num_keys: n as u32,
                 m: m as u32,
             }),
             None => Err(BuildError::Exhausted),
@@ -141,7 +131,7 @@ impl PtHashPhf {
     }
 }
 
-impl PerfectHashFunction for PtHashPhf {
+impl PerfectHashFunction for PackedChdPhf {
     fn build(hashes: &[u64], m: usize) -> Result<Self, BuildError> {
         Self::build_with_lambda(hashes, m, DEFAULT_LAMBDA)
     }
@@ -162,13 +152,12 @@ impl PerfectHashFunction for PtHashPhf {
     }
 
     fn bits_per_key(&self) -> f64 {
-        let n_approx = self.num_buckets as f64 * DEFAULT_LAMBDA as f64;
-        if n_approx == 0.0 {
+        if self.num_keys == 0 {
             return 0.0;
         }
-        let meta = 64.0 + 32.0 + 32.0 + 32.0; // seed + num_buckets + bits_per_disp + m
+        let meta = 64.0 + 32.0 + 32.0 + 32.0 + 32.0; // seed + num_buckets + num_keys + bits_per_disp + m
         let disp_bits = (self.displacements.len() * 64) as f64;
-        (meta + disp_bits) / n_approx
+        (meta + disp_bits) / self.num_keys as f64
     }
 
     fn bytes_on_heap(&self) -> usize {
@@ -202,7 +191,19 @@ fn write_displacement(disps: &mut [u64], bucket: usize, bits_per_disp: u32, d: u
     }
 }
 
-/// One PTHash construction attempt under a fixed `seed`.
+/// Largest displacement tried for one bucket before retrying with a new seed.
+#[inline]
+fn displacement_search_limit(bits_per_disp: u32) -> u64 {
+    ((1u64 << bits_per_disp) - 1).min(MAX_DISPLACEMENT)
+}
+
+/// `ceil(log2(m)) + 1`, with the `m = 1` minimum handled directly.
+#[inline]
+fn displacement_width(m: usize) -> u32 {
+    if m <= 1 { 1 } else { (m - 1).ilog2() + 2 }
+}
+
+/// One packed CHD-style construction attempt under a fixed `seed`.
 fn try_build_seed(
     hashes: &[u64],
     m: usize,
@@ -214,11 +215,6 @@ fn try_build_seed(
     let n = hashes.len();
     let m_u64 = m as u64;
     let r_u64 = r as u64;
-
-    // Check for duplicate hashes on first seed only.
-    if seed == SEED_BASE && has_duplicate(hashes) {
-        return Err(BuildError::DuplicateHash);
-    }
 
     // Phase 1: bucket assignment + counting
     let mut bucket_of_key = vec![0u32; n];
@@ -253,7 +249,7 @@ fn try_build_seed(
     // Phase 4: per-bucket displacement search
     let num_words = (r * bits_per_disp as usize).div_ceil(64);
     let mut disps = vec![0u64; num_words];
-    let max_disp = (1u64 << bits_per_disp) - 1;
+    let max_disp = displacement_search_limit(bits_per_disp);
     let mut occupied = vec![false; m];
     let mut tentative = Vec::with_capacity(16);
 
@@ -310,13 +306,13 @@ mod tests {
 
     #[test]
     fn build_empty() {
-        let phf = PtHashPhf::build(&[], 0).unwrap();
+        let phf = PackedChdPhf::build(&[], 0).unwrap();
         assert_eq!(phf.capacity(), 0);
     }
 
     #[test]
     fn build_single() {
-        let phf = PtHashPhf::build(&[42], 1).unwrap();
+        let phf = PackedChdPhf::build(&[42], 1).unwrap();
         assert_eq!(phf.index(42), 0);
     }
 
@@ -324,7 +320,7 @@ mod tests {
     fn minimal_small_round_trip() {
         for &n in &[2usize, 8, 64, 256, 1024] {
             let hashes = make_hashes(n);
-            let phf = PtHashPhf::build(&hashes, n).expect("build should succeed at λ=4, m=n");
+            let phf = PackedChdPhf::build(&hashes, n).expect("build should succeed at λ=4, m=n");
             let mut seen = vec![false; n];
             for &h in &hashes {
                 let s = phf.index(h);
@@ -340,7 +336,7 @@ mod tests {
     fn minimal_medium_round_trip() {
         let n = 50_000;
         let hashes = make_hashes(n);
-        let phf = PtHashPhf::build(&hashes, n).expect("minimal build at N=50K");
+        let phf = PackedChdPhf::build(&hashes, n).expect("minimal build at N=50K");
         let mut seen = vec![false; n];
         for &h in &hashes {
             let s = phf.index(h);
@@ -355,7 +351,7 @@ mod tests {
         let n = 10_000;
         let m = (n as f64 * 1.23) as usize;
         let hashes = make_hashes(n);
-        let phf = PtHashPhf::build(&hashes, m).expect("non-minimal build succeeds");
+        let phf = PackedChdPhf::build(&hashes, m).expect("non-minimal build succeeds");
         assert_eq!(phf.capacity(), m);
         let mut seen = vec![false; m];
         for &h in &hashes {
@@ -369,7 +365,7 @@ mod tests {
     #[test]
     fn duplicate_hash_is_reported() {
         let hashes = vec![1, 2, 3, 4, 1];
-        let err = PtHashPhf::build(&hashes, 5).unwrap_err();
+        let err = PackedChdPhf::build(&hashes, 5).unwrap_err();
         assert_eq!(err, BuildError::DuplicateHash);
     }
 
@@ -377,11 +373,38 @@ mod tests {
     fn bits_per_key_sane() {
         let n = 10_000;
         let hashes = make_hashes(n);
-        let phf = PtHashPhf::build(&hashes, n).unwrap();
+        let phf = PackedChdPhf::build(&hashes, n).unwrap();
         let bpk = phf.bits_per_key();
         assert!(
             bpk > 0.0 && bpk < 10.0,
             "bits_per_key {bpk} outside expected range"
         );
+    }
+
+    #[test]
+    fn displacement_width_matches_documented_formula() {
+        assert_eq!(displacement_width(1), 1);
+        assert_eq!(displacement_width(8), 4);
+        assert_eq!(displacement_width(9), 5);
+    }
+
+    #[test]
+    fn displacement_search_is_bounded_before_seed_retry() {
+        assert_eq!(displacement_search_limit(4), 15);
+        assert_eq!(displacement_search_limit(32), MAX_DISPLACEMENT);
+    }
+
+    #[test]
+    fn large_lambda_does_not_overflow_bucket_rounding() {
+        let phf = PackedChdPhf::build_with_lambda(&[42], 1, usize::MAX).unwrap();
+        assert_eq!(phf.index(42), 0);
+    }
+
+    #[test]
+    fn bits_per_key_uses_actual_key_count() {
+        let hashes = make_hashes(3);
+        let phf = PackedChdPhf::build_with_lambda(&hashes, 3, 4).unwrap();
+        let expected = (192.0 + (phf.displacements.len() * 64) as f64) / 3.0;
+        assert_eq!(phf.bits_per_key(), expected);
     }
 }

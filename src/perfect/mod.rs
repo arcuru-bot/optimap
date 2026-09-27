@@ -40,8 +40,8 @@
 
 pub mod bucketed;
 mod chd;
+mod packed_chd;
 mod phf;
-mod pthash;
 mod set;
 mod util;
 
@@ -51,8 +51,8 @@ pub use bucketed::{
     PerfectSetMultilevelBucketed,
 };
 pub use chd::{ChdBuildProfile, ChdPhf};
+pub use packed_chd::PackedChdPhf;
 pub use phf::{BuildError, PerfectHashFunction};
-pub use pthash::PtHashPhf;
 pub use set::PerfectSet;
 
 use crate::map::DefaultHashBuilder;

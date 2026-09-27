@@ -45,9 +45,9 @@ pub trait PerfectHashFunction: Sized {
     fn bits_per_key(&self) -> f64;
 
     /// Heap bytes owned by the PHF data structure (boxed slices, etc.).
-    /// Defaults to `size_of::<Self>()` — override for types with heap allocations.
+    /// Defaults to zero — inline struct storage is not heap allocation.
     fn bytes_on_heap(&self) -> usize {
-        std::mem::size_of::<Self>()
+        0
     }
 }
 

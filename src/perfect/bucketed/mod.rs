@@ -278,7 +278,6 @@ where
     pub fn bytes_used(&self) -> usize {
         self.tags.len() * std::mem::size_of::<BucketTags>()
             + self.entries.len() * std::mem::size_of::<(K, V)>()
-            + std::mem::size_of::<BucketedPhf>()
     }
 
     /// Access the hash builder used at construction.
@@ -456,7 +455,6 @@ where
     pub fn bytes_used(&self) -> usize {
         self.tags.len() * std::mem::size_of::<BucketTags>()
             + self.keys.len() * std::mem::size_of::<K>()
-            + std::mem::size_of::<BucketedPhf>()
     }
 
     /// Iterate over `&K` in slot order.

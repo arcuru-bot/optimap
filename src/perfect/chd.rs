@@ -22,8 +22,7 @@ use super::util::{bucket_of, has_duplicate, mix};
 use std::time::{Duration, Instant};
 
 /// Signature of a per-seed construction routine — either CHD's mixed-d
-/// walk ([`try_build_seed`]) or PTHash's pilot search
-/// ([`try_build_seed_pilot`]). Named to keep [`ChdPhf::build_impl`]'s
+/// walk or PTHash's pilot search. Named to keep [`ChdPhf::build_impl`]'s
 /// parameter list readable.
 type SeedBuilder = fn(
     &[u64],
@@ -162,10 +161,10 @@ impl ChdPhf {
     /// Higher `λ` trades the other way — fewer, bigger buckets, so the
     /// per-bucket geometric blow-up `(1/(1 − α))^|bucket|` bites harder.
     ///
-    /// `λ` must be > 0. The default is [`DEFAULT_LAMBDA`] (5); CHD's
-    /// theoretical lower bound for minimal PHFs is around λ ≈ 4. Beyond
-    /// the default, minimal (`m = n`) builds grow increasingly likely to
-    /// exhaust [`MAX_SEED_RETRIES`] — if that happens, give the table slack
+    /// `λ` must be > 0. The default is 5; CHD's theoretical lower bound
+    /// for minimal PHFs is around λ ≈ 4. Beyond the default, minimal
+    /// (`m = n`) builds grow increasingly likely to exhaust the seed-retry
+    /// budget — if that happens, give the table slack
     /// (`m > n`) rather than chasing a larger λ.
     pub fn build_with_profile_lambda(
         hashes: &[u64],
@@ -184,7 +183,7 @@ impl ChdPhf {
     }
 
     /// Build a PHF using PTHash's *pilot* displacement search instead of
-    /// CHD's mixed-displacement walk (see [`try_build_seed_pilot`]).
+    /// CHD's mixed-displacement walk.
     ///
     /// The resulting [`ChdPhf`] is otherwise identical — same bucketing,
     /// same λ, same displacement table shape — but its `index` evaluates
@@ -516,8 +515,8 @@ fn try_build_seed(
 
 /// One PTHash-style construction attempt under a fixed `seed`.
 ///
-/// Bucketing, counting-sort, and ordering are identical to
-/// [`try_build_seed`]; only the displacement search differs. This
+/// Bucketing, counting-sort, and ordering are identical to the regular
+/// CHD seed attempt; only the displacement search differs. This
 /// implements §4.1 of Pibiri & Trani 2021: a bucket's *pilot* `k` is tried
 /// in increasing order `0, 1, 2, …`, and the position of key `x` is
 /// `(h(x, seed) ⊕ h(k, seed)) mod m`, where `h(·, seed)` is the splitmix64
