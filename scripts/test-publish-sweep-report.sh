@@ -60,6 +60,23 @@ test -s "$tmp/default.md"
 grep -Eq '^- Command: `cargo bench --bench sweep -- --op lookup_miss --design-set baseline --max-n 1000`$' "$tmp/default.md"
 echo 'publish-sweep-report default-flags control: PASS'
 
+# A truncated sweep (interrupted run) must be refused, not plotted.
+short_a="$tmp/short-a"
+short_b="$tmp/short-b"
+cp -r "$fixture/run-a" "$short_a"
+cp -r "$fixture/run-b" "$short_b"
+for d in "$short_a" "$short_b"; do
+    grep -v '^lookup_hit,Tomb,1000,' "$d/sweep.csv" >"$d/sweep.csv.tmp"
+    mv "$d/sweep.csv.tmp" "$d/sweep.csv"
+done
+if python3 "$project_dir/scripts/publish-sweep-report.py" "$tmp/short.md" "$short_a" "$short_b" 2>"$tmp/short.err"; then
+    echo 'publisher accepted an incomplete sweep grid' >&2
+    exit 1
+fi
+grep -Fq 'an incomplete sweep cannot be published' "$tmp/short.err"
+test ! -e "$tmp/short.md"
+echo 'publish-sweep-report incomplete-grid control: PASS'
+
 # A generation failure must preserve the existing report and asset tree.
 echo sentinel >"$tmp/report.md"
 echo sentinel >"$tmp/report-assets/sentinel"

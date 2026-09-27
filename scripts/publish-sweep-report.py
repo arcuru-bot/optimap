@@ -155,6 +155,21 @@ def main():
         if set(points) != expected:
             fail(f"{run}/sweep.csv: point grid differs from {args.runs[0]}/sweep.csv")
 
+    # Both the per-operation curves and the headline table index every
+    # (operation, design, N) cell, so a truncated sweep must be refused here
+    # rather than raising from inside plotting.
+    for operation in sorted({op for op, _, _ in expected}):
+        rows = [(design, n) for op, design, n in expected if op == operation]
+        designs = sorted({design for design, _ in rows})
+        ns = sorted({n for _, n in rows})
+        if len(rows) != len(designs) * len(ns):
+            missing = sorted(set((d, n) for d in designs for n in ns) - set(rows))
+            fail(
+                f"{args.runs[0]}/sweep.csv: operation {operation} is missing "
+                f"{len(missing)} of {len(designs) * len(ns)} (design, N) cells "
+                f"(first: {missing[0]}); an incomplete sweep cannot be published"
+            )
+
     data = defaultdict(list)
     for points in point_sets:
         for key, value in points.items():
