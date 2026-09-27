@@ -38,6 +38,28 @@ if python3 "$project_dir/scripts/publish-sweep-report.py" "$tmp/bad.md" "$fixtur
 fi
 grep -Fq 'rustflags differs' "$tmp/bad.err"
 
+# Default (unset) RUSTFLAGS is a recorded value, not missing metadata: the
+# nightly refresh publishes runs whose environment set no RUSTFLAGS.
+default_a="$tmp/default-a"
+default_b="$tmp/default-b"
+cp -r "$fixture/run-a" "$default_a"
+cp -r "$fixture/run-b" "$default_b"
+python3 - "$default_a/meta.json" "$default_b/meta.json" <<'PY'
+import json, sys
+for path in sys.argv[1:]:
+    with open(path) as source:
+        meta = json.load(source)
+    meta["rustflags"] = ""
+    with open(path, "w") as output:
+        json.dump(meta, output)
+PY
+printf '%s\n' --op lookup_miss --design-set baseline --max-n 1000 >"$default_a/sweep.args"
+printf '%s\n' --op lookup_miss --design-set baseline --max-n 1000 >"$default_b/sweep.args"
+python3 "$project_dir/scripts/publish-sweep-report.py" "$tmp/default.md" "$default_a" "$default_b" >/dev/null
+test -s "$tmp/default.md"
+grep -Eq '^- Command: `cargo bench --bench sweep -- --op lookup_miss --design-set baseline --max-n 1000`$' "$tmp/default.md"
+echo 'publish-sweep-report default-flags control: PASS'
+
 # A generation failure must preserve the existing report and asset tree.
 echo sentinel >"$tmp/report.md"
 echo sentinel >"$tmp/report-assets/sentinel"

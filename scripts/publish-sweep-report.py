@@ -45,9 +45,18 @@ def metadata(run):
     kernel = raw.get("kernel")
     args = run / "sweep.args"
     if args.exists():
-        command = "cargo bench --bench sweep -- " + args.read_text().strip()
+        # sweep.args stores one argument per line; collapse it so the
+        # recorded command stays a single line wherever it is rendered.
+        command = "cargo bench --bench sweep -- " + " ".join(args.read_text().split())
     required = {"SHA": sha, "date": date, "host": host, "governor": governor, "command": command, "git_dirty_files": dirty, "rustc": rustc, "rustflags": rustflags, "kernel": kernel}
-    missing = [name for name, value in required.items() if value is None or value == ""]
+    # An unset RUSTFLAGS is a recorded value (the default codegen), not
+    # missing metadata: the sweep runner writes "" when the environment sets
+    # nothing, and those runs stay publishable and comparable with each other.
+    missing = [
+        name
+        for name, value in required.items()
+        if value is None or (value == "" and name != "rustflags")
+    ]
     if missing:
         fail(f"{path}: missing {', '.join(missing)}")
     return {"sha": str(sha), "date": str(date), "host": str(host), "governor": str(governor), "command": str(command), "dirty": str(dirty), "rustc": str(rustc), "rustflags": str(rustflags), "kernel": str(kernel), "load": str(raw.get("loadavg_start", "not recorded"))}
