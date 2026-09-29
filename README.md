@@ -122,7 +122,7 @@ Designs are not hand-coded — they're composed from traits:
 | Group width | `GroupOps` | 15-slot, 16-slot, 32-slot, 64-slot |
 | Load factor | `GroupLayout::LOAD_FACTOR_NUM/DEN` | Default 7/8 (87.5%), customizable |
 
-New variants are ~30 lines: a type alias composing these traits. The `matrix_types` module in `src/lib.rs` holds experimental combinations (~70 type aliases). The sweep benchmark's `--design-set all` exercises every one of them.
+New variants take one line each: a macro invocation defining a type alias and trait impl from these traits. The `matrix_types` module in `src/lib.rs` holds experimental combinations (~70 type aliases). The sweep benchmark's `--design-set all` exercises every one of them.
 
 ## Default benchmark tables
 
