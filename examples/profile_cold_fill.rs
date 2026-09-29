@@ -7,7 +7,7 @@
 //! allocation after `clear()`. `allocation_only` minimally inserts and then
 //! consumes one entry through a black-boxed map so its backing allocation is
 //! observably used rather than optimized away; cold fill measures allocation
-//! plus all N inserts.
+//! plus all N inserts. Each case checks its map contents after timing stops.
 
 use optimap::Map;
 use optimap::matrix_types::HighTag128_TombMap;
@@ -91,7 +91,7 @@ fn allocate_only<M: Map<u64, u64>>(n: usize) -> Duration {
     map.insert(0, 0);
     let map = std::hint::black_box(map);
     let elapsed = start.elapsed();
-    drop(map);
+    assert_eq!(map.get(&0), Some(&0), "allocation control lost its entry");
     elapsed
 }
 
@@ -100,7 +100,9 @@ fn cold_fill<M: Map<u64, u64>>(keys: &[u64]) -> Duration {
     let mut map = M::with_capacity(keys.len());
     fill(&mut map, keys);
     std::hint::black_box(map.len());
-    start.elapsed()
+    let elapsed = start.elapsed();
+    assert_eq!(map.len(), keys.len(), "cold fill lost entries");
+    elapsed
 }
 
 fn warm_fill<M: Map<u64, u64>>(keys: &[u64]) -> Duration {
@@ -110,7 +112,9 @@ fn warm_fill<M: Map<u64, u64>>(keys: &[u64]) -> Duration {
     let start = Instant::now();
     fill(&mut map, keys);
     std::hint::black_box(map.len());
-    start.elapsed()
+    let elapsed = start.elapsed();
+    assert_eq!(map.len(), keys.len(), "warm fill lost entries");
+    elapsed
 }
 
 fn fill<M: Map<u64, u64>>(map: &mut M, keys: &[u64]) {

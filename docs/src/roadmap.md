@@ -123,7 +123,7 @@ The `Map` → `HashedMap` rename has shipped. Remaining work fleshes out `Sorted
 #### Hashbrown wins at small N — residual cold allocate+fill gap
 
 **Difficulty**: Medium \
-**Status**: Diagnosis corrected 2026-08-24. The prior allocation-only control black-boxed only `capacity()`, letting hashbrown's allocation be elided; its allocation-parity and perf-counter conclusion is withdrawn. The repaired control forces a real backing allocation by inserting one entry and black-boxing the map. It finds allocation parity at N=10K, while Tomb remains slower for warm and cold fills. No hot-code change is justified yet.
+**Status**: Diagnosis corrected 2026-08-24. The prior allocation-only control black-boxed only `capacity()`, letting hashbrown's allocation be elided; its allocation-parity and perf-counter conclusion is withdrawn. The repaired control forces a real backing allocation by inserting one entry and black-boxing the map. This bounded diagnostic finds allocation parity at N=10K, while Tomb remains slower for warm and cold fills; fill magnitudes drift between sessions, so it is not a performance ranking. No hot-code change is justified yet.
 
 **What's established (criterion, fixed-N, not the noisy sweep small-batch):**
 
