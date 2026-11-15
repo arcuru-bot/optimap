@@ -1,0 +1,9 @@
+operation,design,n,ns_per_op
+insert,hashbrown,100,12
+insert,Tomb,100,10
+insert,hashbrown,1000,22
+insert,Tomb,1000,20
+lookup_hit,hashbrown,100,9
+lookup_hit,Tomb,100,8
+lookup_hit,hashbrown,1000,18
+lookup_hit,Tomb,1000,15

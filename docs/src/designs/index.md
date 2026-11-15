@@ -9,7 +9,7 @@ The five hash map implementations share these properties:
 - SIMD-accelerated metadata probing (SSE2/NEON/scalar fallback)
 - Quadratic probe sequence over power-of-two group counts
 - foldhash as default hasher (avalanching, fast)
-- 70% default load factor
+- 87.5% maximum load factor (fixed for these maps)
 - Generic `Map` trait for uniform benchmarking and generic code
 
 All five share a common `GenericMap` wrapper (entry API, iterators, trait impls) via the `RawTableApi` trait. See [Architecture](../architecture.md) for details.

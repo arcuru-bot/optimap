@@ -15,6 +15,7 @@
 # Benchmarks
 
 - [Methodology](benchmarks/methodology.md)
+- [Repeated sweep reports](benchmarks/repeated-sweeps.md)
 - [Results](benchmarks/results.md)
 
 # Architecture

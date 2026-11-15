@@ -44,6 +44,8 @@ Operations: insert, lookup_hit, lookup_miss, remove, iterate. Insert warmups rep
 
 Pipeline: `./scripts/sweep-bench.sh` runs the benchmark, saves timestamped CSV to `bench-results/`, and generates per-operation PNG graphs via gnuplot. `scripts/aggregate-sweeps.py output.csv run-a/sweep.csv run-b/sweep.csv` pointwise aggregates repeated, same-SHA CSVs by deterministic upper median while preserving the existing `operation,design,n,ns_per_op` schema. It refuses inputs with different `meta.json` `git_sha` values. Feed that aggregate to `scripts/cv-compare.py` before making CV or peak/floor claims. A single CSV remains valid for a one-run mean/curve reading; it simply is not evidence for consistency claims.
 
+For durable publication, `scripts/publish-sweep-report.py docs/src/benchmarks/reports/<name>.md run-a run-b [...]` produces a Markdown report plus SVG curves for mdBook. It requires at least two runs and refuses SHA, host, governor, command, or point-grid mismatches. It reports a pointwise median with an observed min–max band across runs, along with date, host, governor, start load, and command provenance. The band is descriptive uncertainty, not a confidence interval or a CV claim. See [Repeated sweep reports](repeated-sweeps.md) for the check-in workflow.
+
 This captures what criterion benchmarks miss: rehash sawtooth, cache boundary transitions, and natural load factor cycling across the full N range.
 
 ### Hash tag variant sweep

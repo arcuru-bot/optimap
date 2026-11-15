@@ -83,10 +83,14 @@ book-test:
     cargo build
     mdbook test docs -L target/debug/deps
 
+# Verify deterministic report and SVG generation from small committed sweep CSVs.
+report-test:
+    ./scripts/test-publish-sweep-report.sh
+
 # Test all documentation (rustdoc + mdbook)
 doc-test: test-doc book-test
 
 # --- CI-like checks ---
 
 # Run everything CI would run
-ci: fmt-check lint test-all doc book
+ci: fmt-check lint test-all doc book report-test

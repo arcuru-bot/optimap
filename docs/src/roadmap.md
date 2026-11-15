@@ -123,7 +123,7 @@ The `Map` → `HashedMap` rename has shipped. Remaining work fleshes out `Sorted
 #### Hashbrown wins at small N — residual cold allocate+fill gap
 
 **Difficulty**: Medium \
-**Status**: One cause found and fixed (rehash specialization — see Recently Completed). A second, larger gap remains and its cause is **not yet identified**. Two hypotheses tested and rejected.
+**Status**: Diagnosis corrected 2026-08-24. The prior allocation-only control black-boxed only `capacity()`, letting hashbrown's allocation be elided; its allocation-parity and perf-counter conclusion is withdrawn. The repaired control forces a real backing allocation by inserting one entry and black-boxing the map. This bounded diagnostic finds allocation parity at N=10K, while Tomb remains slower for warm and cold fills; fill magnitudes drift between sessions, so it is not a performance ranking. No hot-code change is justified yet.
 
 **What's established (criterion, fixed-N, not the noisy sweep small-batch):**
 
@@ -138,13 +138,11 @@ So the gap is specific to **cold allocate-then-fill**. It is _not_ the steady-st
 1. _Smaller initial-table strategy_ — hashbrown's 4/8/16-bucket micro-tables only matter for N<14; benches at N≥1K are past that. Cannot explain a 10K gap.
 2. _Double-probe in the plain insert path_ — `insert_or_replace`'s overflow fallback did `find_by_hash` then `insert_no_check` (two probes) where the entry path uses the fused `find_or_locate`. Rewriting the fallback to use `find_or_locate` + `insert_at` **regressed** `with_capacity/10000` by ~12% (49→55 µs). `find_or_locate` re-probes the home group (already done in the fast path) and crosses an `#[inline(never)]` boundary to `find_or_locate_overflow`; net worse than the redundant simple probe. Reverted.
 
-**Next steps (need a profiler, not more code-reading):**
+**Focused profile (2026-08-24, carbon, N=10K):** `examples/profile_cold_fill.rs` independently selects `allocation_only`, `warm_fill_only`, and `cold_allocate_and_fill` for Tomb and hashbrown. `allocation_only` now allocates with `with_capacity(10000)`, inserts one entry, then black-boxes the map before timing ends; this makes the backing allocation and use observable for both implementations. The earlier driver black-boxed only `capacity()`, which did not retain hashbrown's allocation, so its 2026-08-23 allocation conclusion and all derived `perf stat` counters are invalid and withdrawn. A corrected 301-run same-session control (`cargo run --release --example profile_cold_fill -- 301 all all`) measured Tomb/hashbrown at **0.130/0.130 µs allocation**, **49.643/44.934 µs warm fill** (Tomb +10.5%), and **47.849/45.575 µs cold allocate+fill** (Tomb +5.0%). The allocation-only parity and the retained warm/cold fill gap establish that allocation is not sufficient to explain the cold gap; they do **not** establish a specific instruction-scheduling or IPC cause.
 
-1. `perf stat` / `perf record` on a single-design micro-bench that does only `with_capacity(10000)` + fill, Tomb vs hashbrown. Compare cycles, branch-misses, LLC-misses, page-faults. The zero-resize variant isolates the question cleanly.
-2. Split allocate cost from fill cost: time `with_capacity(10000)` alone (drop without filling) vs fill-only on a warm allocation. Determines whether the gap is in `allocate` (layout math, the memset of metadata, first-touch faulting pattern) or in the per-insert codegen at rising load.
-3. Only after a profiled hotspot is identified: disassembly diff of the identified region vs hashbrown's equivalent.
+**Next step:** collect valid `perf record` / annotated disassembly on the repaired driver before identifying an insert-path cause or changing hot code. Do not re-run the rejected initial-table, fused double-probe, probe-prefetch, probe-width, or speculative prefetch ideas.
 
-Methodology note: the original sweep `keys[prev_n..n]` small-batch numbers are noise-heavy and resize-spike-dominated; ignore them for this — use the `construction` criterion benches above, which are stable and isolate alloc/resize/fill.
+Methodology note: the original sweep `keys[prev_n..n]` small-batch numbers are noise-heavy and resize-spike-dominated; ignore them for this — use the focused driver or `construction` criterion benches, which isolate alloc/resize/fill.
 
 #### Hashbrown wins at large N on lookup_hit — diagnosis complete; fix shipped (K/V prefetch drop default, byte-offset probe opt-in & neutral)
 
