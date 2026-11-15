@@ -275,6 +275,8 @@ where
         (self.tags.len() * SLOTS_PER_BUCKET * 8) as f64 / self.len as f64
     }
 
+    /// Owned tag and entry array bytes. Excludes inline fields, allocations
+    /// owned by keys/values, and allocator overhead.
     pub fn bytes_used(&self) -> usize {
         self.tags.len() * std::mem::size_of::<BucketTags>()
             + self.entries.len() * std::mem::size_of::<(K, V)>()
@@ -522,6 +524,7 @@ mod tests {
     fn map_empty_round_trip() {
         let m = PerfectMapBucketed::<u64, u64>::from_iter_perfect(std::iter::empty()).unwrap();
         assert_eq!(m.len(), 0);
+        assert_eq!(m.bytes_used(), 0);
         assert!(m.is_empty());
         assert_eq!(m.get(&0), None);
     }
@@ -648,6 +651,7 @@ mod tests {
     fn set_empty_round_trip() {
         let s = PerfectSetBucketed::<u64>::from_iter_perfect(std::iter::empty()).unwrap();
         assert_eq!(s.len(), 0);
+        assert_eq!(s.bytes_used(), 0);
         assert!(s.is_empty());
         assert!(!s.contains(&0));
     }

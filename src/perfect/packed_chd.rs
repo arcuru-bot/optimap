@@ -11,11 +11,11 @@
 //! encoding. The separate [`super::ChdPhf::build_with_profile_pilot`]
 //! experiment implements the pilot search.
 //!
-//! At the default `λ = 4`, smaller buckets make construction roughly
-//! 2.6–3× faster than the default `ChdPhf` configuration measured for this
-//! branch. The fixed-width table uses about 5.3 bits/key at one million
-//! keys versus about 6.4 bits/key for `ChdPhf`; the slot array still
-//! dominates total map memory.
+//! The default `λ = 4` trades a larger bucket table for smaller buckets
+//! than the default `ChdPhf` configuration. The fixed-width table uses
+//! about 5.3 bits/key at one million keys versus about 6.4 bits/key for
+//! `ChdPhf`; the slot array still dominates total map memory. These are
+//! layout calculations, not allocator measurements or timing results.
 
 use super::phf::{BuildError, PerfectHashFunction};
 use super::util::{bucket_of, has_duplicate, mix};
@@ -91,7 +91,7 @@ impl PackedChdPhf {
         let mut final_seed = SEED_BASE;
         for seed_try in 0..MAX_SEED_RETRIES {
             let seed = SEED_BASE.wrapping_add(seed_try as u64);
-            match try_build_seed(hashes, m, r, lambda, bits_per_disp, seed) {
+            match try_build_seed(hashes, m, r, bits_per_disp, seed) {
                 Ok(disp) => {
                     build_disp = Some(disp);
                     final_seed = seed;
@@ -138,7 +138,7 @@ impl PerfectHashFunction for PackedChdPhf {
 
     #[inline]
     fn index(&self, hash: u64) -> usize {
-        if self.m == 0 {
+        if self.num_keys == 0 {
             return 0;
         }
         let r = self.num_buckets as u64;
@@ -156,7 +156,7 @@ impl PerfectHashFunction for PackedChdPhf {
             return 0.0;
         }
         let meta = 64.0 + 32.0 + 32.0 + 32.0 + 32.0; // seed + num_buckets + num_keys + bits_per_disp + m
-        let disp_bits = (self.displacements.len() * 64) as f64;
+        let disp_bits = self.displacements.len() as f64 * 64.0;
         (meta + disp_bits) / self.num_keys as f64
     }
 
@@ -208,13 +208,19 @@ fn try_build_seed(
     hashes: &[u64],
     m: usize,
     r: usize,
-    _lambda: usize,
     bits_per_disp: u32,
     seed: u64,
 ) -> Result<Vec<u64>, BuildError> {
     let n = hashes.len();
     let m_u64 = m as u64;
     let r_u64 = r as u64;
+    let num_words = r
+        .checked_mul(bits_per_disp as usize)
+        .expect("packed CHD displacement size overflows usize before allocation")
+        .div_ceil(64);
+    let num_starts = r
+        .checked_add(1)
+        .expect("packed CHD bucket count overflows usize before allocation");
 
     // Phase 1: bucket assignment + counting
     let mut bucket_of_key = vec![0u32; n];
@@ -226,7 +232,7 @@ fn try_build_seed(
     }
 
     // Phase 2: counting sort for flat bucket-major layout
-    let mut bucket_start = vec![0u32; r + 1];
+    let mut bucket_start = vec![0u32; num_starts];
     let mut acc = 0u32;
     for (i, &sz) in bucket_sizes.iter().enumerate() {
         bucket_start[i] = acc;
@@ -247,7 +253,6 @@ fn try_build_seed(
     order.sort_unstable_by(|&a, &b| bucket_sizes[b as usize].cmp(&bucket_sizes[a as usize]));
 
     // Phase 4: per-bucket displacement search
-    let num_words = (r * bits_per_disp as usize).div_ceil(64);
     let mut disps = vec![0u64; num_words];
     let max_disp = displacement_search_limit(bits_per_disp);
     let mut occupied = vec![false; m];
@@ -308,6 +313,15 @@ mod tests {
     fn build_empty() {
         let phf = PackedChdPhf::build(&[], 0).unwrap();
         assert_eq!(phf.capacity(), 0);
+    }
+
+    #[test]
+    fn empty_with_spare_capacity_has_in_range_index() {
+        let phf = PackedChdPhf::build(&[], 8).unwrap();
+        assert_eq!(phf.capacity(), 8);
+        assert_eq!(phf.bytes_on_heap(), 0);
+        assert_eq!(phf.bits_per_key(), 0.0);
+        assert!(phf.index(42) < 8);
     }
 
     #[test]
@@ -392,6 +406,58 @@ mod tests {
     fn displacement_search_is_bounded_before_seed_retry() {
         assert_eq!(displacement_search_limit(4), 15);
         assert_eq!(displacement_search_limit(32), MAX_DISPLACEMENT);
+    }
+
+    #[test]
+    #[should_panic(expected = "packed CHD displacement size overflows usize before allocation")]
+    fn oversized_packed_table_fails_before_allocation() {
+        let _ = try_build_seed(&[], 0, usize::MAX, 2, SEED_BASE);
+    }
+
+    #[test]
+    fn packed_backends_round_trip_and_account_for_owned_arrays() {
+        use crate::map::DefaultHashBuilder;
+        use crate::perfect::{
+            PerfectMap, PerfectMapConfig, PerfectMapSparse, PerfectMapUnchecked, PerfectSet,
+        };
+
+        let entries: Vec<(u64, u64)> = (0..32).map(|k| (k, k * 31)).collect();
+        let map = PerfectMap::<_, _, PackedChdPhf>::from_entries(
+            entries.clone(),
+            DefaultHashBuilder::default(),
+        )
+        .unwrap();
+        let unchecked = PerfectMapUnchecked::<_, _, PackedChdPhf>::from_entries(
+            entries.clone(),
+            DefaultHashBuilder::default(),
+        )
+        .unwrap();
+        let set = PerfectSet::<_, PackedChdPhf>::from_keys(0u64..32, DefaultHashBuilder::default())
+            .unwrap();
+        let sparse = PerfectMapSparse::<_, _, PackedChdPhf>::from_entries_with(
+            entries.clone(),
+            DefaultHashBuilder::default(),
+            &PerfectMapConfig::default().with_load_factor(1.5),
+        )
+        .unwrap();
+        for (k, v) in &entries {
+            assert_eq!(map.get(k), Some(v));
+            assert_eq!(unchecked.get_unchecked(k), v);
+            assert!(set.contains(k));
+            assert_eq!(sparse.get(k), Some(v));
+        }
+        assert_eq!(map.get(&32), None);
+        assert!(!set.contains(&32));
+        assert_eq!(sparse.get(&32), None);
+        // Eight buckets × six bits occupy one u64; slack widens the
+        // sparse displacements to seven bits, still within one u64.
+        assert_eq!(map.bytes_used(), 32 * 16 + 8);
+        assert_eq!(unchecked.bytes_used(), 32 * 8 + 8);
+        assert_eq!(set.bytes_used(), 32 * 8 + 8);
+        assert_eq!(
+            sparse.bytes_used(),
+            48 * std::mem::size_of::<Option<(u64, u64)>>() + 8
+        );
     }
 
     #[test]

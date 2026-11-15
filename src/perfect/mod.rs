@@ -205,8 +205,8 @@ where
         self.phf.bits_per_key()
     }
 
-    /// Total heap memory in use (slot array + PHF metadata). Excludes
-    /// `hash_builder` (opaque, typically 8–48 bytes on the stack).
+    /// Owned slot array bytes plus PHF heap storage. Excludes inline fields,
+    /// allocations owned by keys/values, and allocator overhead.
     pub fn bytes_used(&self) -> usize {
         self.slots.len() * std::mem::size_of::<(K, V)>() + self.phf.bytes_on_heap()
     }

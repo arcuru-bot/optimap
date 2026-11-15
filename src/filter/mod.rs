@@ -4,8 +4,8 @@
 //!
 //! | Filter | Construction | Best at |
 //! |--------|:------------:|---------|
-//! | [`BinaryFuse8`] | Peel-queue (O(n)) | Fast build; footprint varies with segment rounding |
-//! | [`Xor8`] | Sorted-peel (O(n log n)) | Same output, simpler retry |
+//! | [`BinaryFuse8`] | Peel queue after sorted duplicate check | Fast peel; footprint varies with segment rounding |
+//! | [`Xor8`] | Repeated sorted peel | Same layout, simpler retry |
 //!
 //! Keys are pre-hashed `u64` values; hashing is the caller's responsibility.
 //! Input hashes must be unique: duplicate hashes are rejected, and distinct
@@ -112,6 +112,8 @@ impl BinaryFuse8 {
     /// Submitted hashes never produce false negatives; other hashes can produce
     /// false positives. Duplicate hashes panic because they cannot be represented.
     pub fn build(hashes: &[u64]) -> Self {
+        // Validate sizing before even allocating the duplicate-check copy.
+        fingerprint_array_length(compute_segment_length(hashes.len()));
         assert_unique_hashes(hashes);
         for seed in 0u64.. {
             if let Some(filter) = Self::try_build_with_seed(hashes, seed) {
@@ -135,7 +137,8 @@ impl BinaryFuse8 {
         let sl = compute_segment_length(n);
         let array_len = fingerprint_array_length(sl);
 
-        let mut counts = vec![0u32; array_len];
+        // A position's degree cannot exceed hashes.len(), so usize fits.
+        let mut counts = vec![0usize; array_len];
         let mut xor_sums: Vec<usize> = vec![0; array_len];
 
         // Pre-compute all positions.
@@ -287,7 +290,7 @@ impl BinaryFuse8 {
         if self.n == 0 {
             0.0
         } else {
-            (self.fingerprints.len() * 8) as f64 / self.n as f64
+            self.fingerprints.len() as f64 * 8.0 / self.n as f64
         }
     }
 }
@@ -320,6 +323,8 @@ impl Xor8 {
     /// Submitted hashes never produce false negatives; other hashes can produce
     /// false positives. Duplicate hashes panic because they cannot be represented.
     pub fn build(hashes: &[u64]) -> Self {
+        // Validate sizing before even allocating the duplicate-check copy.
+        fingerprint_array_length(compute_segment_length(hashes.len()));
         assert_unique_hashes(hashes);
         for seed in 0u64.. {
             if let Some(filter) = Self::try_build_with_seed(hashes, seed) {
@@ -343,7 +348,8 @@ impl Xor8 {
         let sl = compute_segment_length(n);
         let array_len = fingerprint_array_length(sl);
 
-        let mut counts = vec![0u32; array_len];
+        // A position's degree cannot exceed hashes.len(), so usize fits.
+        let mut counts = vec![0usize; array_len];
         let mut xor_sums: Vec<usize> = vec![0; array_len];
 
         let mut h0 = vec![0usize; n];
@@ -492,7 +498,7 @@ impl Xor8 {
         if self.n == 0 {
             0.0
         } else {
-            (self.fingerprints.len() * 8) as f64 / self.n as f64
+            self.fingerprints.len() as f64 * 8.0 / self.n as f64
         }
     }
 }
@@ -618,6 +624,30 @@ mod tests {
     #[should_panic(expected = "filter sizing overflow before allocation")]
     fn oversized_segment_length_fails_before_allocation() {
         compute_segment_length(usize::MAX);
+    }
+
+    #[test]
+    fn concentrated_hashes_do_not_overflow_degrees() {
+        let n = 65_536;
+        let sl = compute_segment_length(n);
+        // Invert mix64 to place every distinct hash at position zero in
+        // the first segment for seed zero, exceeding the old u16 degree.
+        let hashes: Vec<u64> = (0..n as u64)
+            .map(|i| {
+                let mut x = i * sl as u64;
+                x ^= (x >> 31) ^ (x >> 62);
+                x = x.wrapping_mul(0x319642b2d24d8ec3);
+                x ^= (x >> 27) ^ (x >> 54);
+                x = x.wrapping_mul(0x96de1b173f119089);
+                x ^ (x >> 30) ^ (x >> 60)
+            })
+            .collect();
+        assert!(hashes.iter().all(|&h| hash_to_position(h, 0, sl) == 0));
+        assert_unique_hashes(&hashes);
+        // This deliberately bad seed may fail to peel, but must not wrap
+        // its degree counters in either construction path.
+        let _ = BinaryFuse8::try_build_with_seed(&hashes, 0);
+        let _ = Xor8::try_build_with_seed(&hashes, 0);
     }
 
     #[test]

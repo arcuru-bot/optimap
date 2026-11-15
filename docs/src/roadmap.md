@@ -372,11 +372,11 @@ from roughly 16.80 to 16.66 B/key (16 B for `(K, V)` plus the PHF); for
 allocator-backed footprint measurements, so they are not comparable to a
 mutable map's allocation footprint.
 
-At λ = 4, smaller buckets plus the extra displacement-width bit converge
-much faster than `ChdPhf`'s default λ = 5 search: **~2.6–3× faster
-construction** (2.1 ms vs 6.7 ms at 10K, 26 ms vs 69 ms at 100K), with the
-same lookup shape. `PackedChdPhf` therefore ships as the **fast-build,
-fixed-width CHD alternative**, not as a PTHash implementation.
+Earlier measurements reported faster construction at λ = 4 than
+`ChdPhf`'s default λ = 5, but those timings have not been rerun after the
+displacement-width and search-bound corrections. No current timing win is
+claimed. `PackedChdPhf` ships as a fixed-width CHD alternative, not as a
+PTHash implementation.
 
 **Deferred — compact encoding.** Compressing the displacement table would
 add decode work or an indirection to the `index()` hot path in exchange for
@@ -621,8 +621,7 @@ the small build-time win, but it is *not* the largest algorithmic lever
 this entry claimed.
 
 `PackedChdPhf` (see above) does *not* implement this: it uses a plain
-linear `d` walk like CHD and gets its build-speed win from the smaller
-λ = 4 buckets.
+linear `d` walk like CHD, with smaller λ = 4 buckets.
 
 #### ~~Tunable `λ` (avg bucket size)~~ **SHIPPED**
 

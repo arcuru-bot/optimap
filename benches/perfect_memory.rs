@@ -4,7 +4,8 @@
 //! N ∈ {10K, 100K, 1M}. The mutable-map row is a layout estimate, not an
 //! allocator-backed footprint measurement; hashbrown's bucket count is not
 //! exposed by its public API, so it is reported as unavailable. All u64 → u64
-//! (or u64-only for sets).
+//! (or u64-only for sets). Accounting includes owned array storage, not
+//! inline structs, allocations owned by keys/values, or allocator overhead.
 
 mod bench_helpers;
 

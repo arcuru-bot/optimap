@@ -576,6 +576,8 @@ where
         bits as f64 / self.len as f64
     }
 
+    /// Owned tag, entry, and overflow array bytes. Excludes inline fields,
+    /// allocations owned by keys/values, and allocator overhead.
     pub fn bytes_used(&self) -> usize {
         self.tags_l0.len() * std::mem::size_of::<BucketTags>()
             + self.entries_l0.len() * std::mem::size_of::<(K, V)>()
@@ -915,6 +917,7 @@ mod tests {
         assert_eq!(phf.num_buckets_level_1(), 0);
         assert!(!phf.has_level_1());
         assert_eq!(phf.overflow_buckets(), 0);
+        assert_eq!(phf.bytes_on_heap(), 0);
         assert!(placements.level.is_empty());
     }
 
@@ -924,6 +927,7 @@ mod tests {
         let (phf, placements) =
             MultilevelBucketedPhf::build(&hashes, DEFAULT_LAMBDA_0, DEFAULT_LAMBDA_1).unwrap();
         assert_eq!(phf.num_buckets_level_0(), 1);
+        assert_eq!(phf.bytes_on_heap(), 8);
         assert!(!phf.has_level_1());
         assert_eq!(placements.level[0], 0);
         assert_eq!(placements.bucket[0], 0);
@@ -975,6 +979,10 @@ mod tests {
         let (phf, placements) = MultilevelBucketedPhf::build(&hashes, 14.0, 4.0).unwrap();
         assert!(phf.has_level_1(), "λ₀=14 at n={n} should produce overflow");
         assert!(phf.overflow_buckets() > 0);
+        assert_eq!(
+            phf.bytes_on_heap(),
+            phf.num_buckets_level_0().div_ceil(64) * 8
+        );
 
         let level_1_count = placements.level.iter().filter(|&&l| l == 1).count();
         assert!(
@@ -1039,6 +1047,7 @@ mod tests {
         let m = PerfectMapMultilevelBucketed::<u64, u64>::from_iter_perfect(std::iter::empty())
             .unwrap();
         assert_eq!(m.len(), 0);
+        assert_eq!(m.bytes_used(), 0);
         assert!(m.is_empty());
         assert!(!m.has_level_1());
         assert_eq!(m.get(&0), None);
@@ -1171,6 +1180,7 @@ mod tests {
     fn set_empty_round_trip() {
         let s = PerfectSetMultilevelBucketed::<u64>::from_iter_perfect(std::iter::empty()).unwrap();
         assert_eq!(s.len(), 0);
+        assert_eq!(s.bytes_used(), 0);
         assert!(!s.contains(&0));
     }
 
