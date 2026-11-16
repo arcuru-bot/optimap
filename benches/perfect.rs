@@ -26,12 +26,15 @@
 //! - `hashbrown::HashMap` — the reference incumbent
 //! - `HighTag128_TombMap` — `MapType::Tomb`, OptiMap's `Auto` default
 //!
-//! All u64 → u64 (or u64-only for `PerfectSet`), N ∈ {10K, 100K, 1M}.
+//! The u64 construction grid remains N ∈ {10K, 100K, 1M}; hit and miss lookup
+//! use 10 points from 10K through 5M. A bounded String hit row covers 10K,
+//! 100K, 300K, and 1M.
 
 mod bench_helpers;
 
 use bench_helpers::{make_miss_keys, make_random_keys};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use std::time::Duration;
 #[cfg(feature = "hasher-ahash")]
 type BenchHasher = ahash::RandomState;
 #[cfg(not(feature = "hasher-ahash"))]
@@ -45,6 +48,10 @@ use optimap::{
 };
 
 const SIZES: &[usize] = &[10_000, 100_000, 1_000_000];
+const SIZES_LOOKUP: &[usize] = &[
+    10_000, 100_000, 200_000, 300_000, 500_000, 700_000, 1_000_000, 1_500_000, 2_000_000, 5_000_000,
+];
+const SIZES_LOOKUP_STRING: &[usize] = &[10_000, 100_000, 300_000, 1_000_000];
 
 fn sample_size_for(n: usize) -> usize {
     if n >= 1_000_000 {
@@ -53,6 +60,17 @@ fn sample_size_for(n: usize) -> usize {
         20
     } else {
         30
+    }
+}
+
+fn cap_large_lookup_timing(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    n: usize,
+) {
+    // Shorten sampling at large N; this does not bound PHF construction time.
+    if n >= 1_500_000 {
+        group.warm_up_time(Duration::from_millis(500));
+        group.measurement_time(Duration::from_secs(2));
     }
 }
 
@@ -218,49 +236,17 @@ fn bench_construction(c: &mut Criterion) {
 fn bench_lookup_hit(c: &mut Criterion) {
     let mut group = c.benchmark_group("perfect/lookup_hit");
 
-    for &n in SIZES {
+    for &n in SIZES_LOOKUP {
         let keys = make_random_keys(n, 42);
         let entries: Vec<(u64, u64)> = keys.iter().map(|&k| (k, k.wrapping_mul(31))).collect();
 
-        // Pre-build all containers once per N.
-        let pm = PerfectMap::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
-        let pms = PerfectMapSparse::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
-        let pmu =
-            PerfectMapUnchecked::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
-        let ps = PerfectSet::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
-        let pm_packed = PerfectMap::<u64, u64, PackedChdPhf>::from_entries(
-            entries.iter().copied(),
-            BenchHasher::default(),
-        )
-        .unwrap();
-        let pmu_packed = PerfectMapUnchecked::<u64, u64, PackedChdPhf>::from_entries(
-            entries.iter().copied(),
-            BenchHasher::default(),
-        )
-        .unwrap();
-        let ps_packed = PerfectSet::<u64, PackedChdPhf>::from_keys(
-            keys.iter().copied(),
-            BenchHasher::default(),
-        )
-        .unwrap();
-        let pmb =
-            PerfectMapBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
-        let psb = PerfectSetBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
-        let pmml =
-            PerfectMapMultilevelBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied())
-                .unwrap();
-        let psml =
-            PerfectSetMultilevelBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
-        let hb: hashbrown::HashMap<u64, u64> = entries.iter().copied().collect();
-        let mut tomb = HighTag128_TombMap::<u64, u64>::with_capacity(n);
-        for &(k, v) in &entries {
-            tomb.insert(k, v);
-        }
-
+        // Build only selected cases, outside the timed lookup loop.
         group.throughput(Throughput::Elements(n as u64));
         group.sample_size(sample_size_for(n));
+        cap_large_lookup_timing(&mut group, n);
 
         group.bench_with_input(BenchmarkId::new("PerfectMap", n), &keys, |b, ks| {
+            let pm = PerfectMap::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
             b.iter(|| {
                 let mut sum = 0u64;
                 for &k in ks {
@@ -271,6 +257,8 @@ fn bench_lookup_hit(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("PerfectMapSparse", n), &keys, |b, ks| {
+            let pms =
+                PerfectMapSparse::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
             b.iter(|| {
                 let mut sum = 0u64;
                 for &k in ks {
@@ -284,6 +272,9 @@ fn bench_lookup_hit(c: &mut Criterion) {
             BenchmarkId::new("PerfectMapUnchecked", n),
             &keys,
             |b, ks| {
+                let pmu =
+                    PerfectMapUnchecked::<u64, u64>::from_iter_perfect(entries.iter().copied())
+                        .unwrap();
                 b.iter(|| {
                     let mut sum = 0u64;
                     for &k in ks {
@@ -295,6 +286,7 @@ fn bench_lookup_hit(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("PerfectSet", n), &keys, |b, ks| {
+            let ps = PerfectSet::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
             b.iter(|| {
                 let mut count = 0u64;
                 for &k in ks {
@@ -310,6 +302,11 @@ fn bench_lookup_hit(c: &mut Criterion) {
             BenchmarkId::new("PerfectMap (packed CHD)", n),
             &keys,
             |b, ks| {
+                let pm_packed = PerfectMap::<u64, u64, PackedChdPhf>::from_entries(
+                    entries.iter().copied(),
+                    BenchHasher::default(),
+                )
+                .unwrap();
                 b.iter(|| {
                     let mut sum = 0u64;
                     for &k in ks {
@@ -324,6 +321,11 @@ fn bench_lookup_hit(c: &mut Criterion) {
             BenchmarkId::new("PerfectMapUnchecked (packed CHD)", n),
             &keys,
             |b, ks| {
+                let pmu_packed = PerfectMapUnchecked::<u64, u64, PackedChdPhf>::from_entries(
+                    entries.iter().copied(),
+                    BenchHasher::default(),
+                )
+                .unwrap();
                 b.iter(|| {
                     let mut sum = 0u64;
                     for &k in ks {
@@ -338,6 +340,11 @@ fn bench_lookup_hit(c: &mut Criterion) {
             BenchmarkId::new("PerfectSet (packed CHD)", n),
             &keys,
             |b, ks| {
+                let ps_packed = PerfectSet::<u64, PackedChdPhf>::from_keys(
+                    keys.iter().copied(),
+                    BenchHasher::default(),
+                )
+                .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -351,6 +358,8 @@ fn bench_lookup_hit(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("PerfectMapBucketed", n), &keys, |b, ks| {
+            let pmb =
+                PerfectMapBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
             b.iter(|| {
                 let mut sum = 0u64;
                 for &k in ks {
@@ -361,6 +370,7 @@ fn bench_lookup_hit(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("PerfectSetBucketed", n), &keys, |b, ks| {
+            let psb = PerfectSetBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
             b.iter(|| {
                 let mut count = 0u64;
                 for &k in ks {
@@ -376,6 +386,10 @@ fn bench_lookup_hit(c: &mut Criterion) {
             BenchmarkId::new("PerfectMapMultilevelBucketed", n),
             &keys,
             |b, ks| {
+                let pmml = PerfectMapMultilevelBucketed::<u64, u64>::from_iter_perfect(
+                    entries.iter().copied(),
+                )
+                .unwrap();
                 b.iter(|| {
                     let mut sum = 0u64;
                     for &k in ks {
@@ -390,6 +404,9 @@ fn bench_lookup_hit(c: &mut Criterion) {
             BenchmarkId::new("PerfectSetMultilevelBucketed", n),
             &keys,
             |b, ks| {
+                let psml =
+                    PerfectSetMultilevelBucketed::<u64>::from_iter_perfect(keys.iter().copied())
+                        .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -403,6 +420,7 @@ fn bench_lookup_hit(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("hashbrown", n), &keys, |b, ks| {
+            let hb: hashbrown::HashMap<u64, u64> = entries.iter().copied().collect();
             b.iter(|| {
                 let mut sum = 0u64;
                 for &k in ks {
@@ -413,6 +431,10 @@ fn bench_lookup_hit(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("HighTag128_Tomb", n), &keys, |b, ks| {
+            let mut tomb = HighTag128_TombMap::<u64, u64>::with_capacity(n);
+            for &(k, v) in &entries {
+                tomb.insert(k, v);
+            }
             b.iter(|| {
                 let mut sum = 0u64;
                 for &k in ks {
@@ -431,42 +453,17 @@ fn bench_lookup_hit(c: &mut Criterion) {
 fn bench_lookup_miss(c: &mut Criterion) {
     let mut group = c.benchmark_group("perfect/lookup_miss");
 
-    for &n in SIZES {
+    for &n in SIZES_LOOKUP {
         let keys = make_random_keys(n, 42);
         let miss_keys = make_miss_keys(n);
         let entries: Vec<(u64, u64)> = keys.iter().map(|&k| (k, k.wrapping_mul(31))).collect();
 
-        let pm = PerfectMap::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
-        let pms = PerfectMapSparse::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
-        let ps = PerfectSet::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
-        let pm_packed = PerfectMap::<u64, u64, PackedChdPhf>::from_entries(
-            entries.iter().copied(),
-            BenchHasher::default(),
-        )
-        .unwrap();
-        let ps_packed = PerfectSet::<u64, PackedChdPhf>::from_keys(
-            keys.iter().copied(),
-            BenchHasher::default(),
-        )
-        .unwrap();
-        let pmb =
-            PerfectMapBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
-        let psb = PerfectSetBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
-        let pmml =
-            PerfectMapMultilevelBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied())
-                .unwrap();
-        let psml =
-            PerfectSetMultilevelBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
-        let hb: hashbrown::HashMap<u64, u64> = entries.iter().copied().collect();
-        let mut tomb = HighTag128_TombMap::<u64, u64>::with_capacity(n);
-        for &(k, v) in &entries {
-            tomb.insert(k, v);
-        }
-
         group.throughput(Throughput::Elements(n as u64));
         group.sample_size(sample_size_for(n));
+        cap_large_lookup_timing(&mut group, n);
 
         group.bench_with_input(BenchmarkId::new("PerfectMap", n), &miss_keys, |b, ks| {
+            let pm = PerfectMap::<u64, u64>::from_iter_perfect(entries.iter().copied()).unwrap();
             b.iter(|| {
                 let mut count = 0u64;
                 for &k in ks {
@@ -482,6 +479,8 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("PerfectMapSparse", n),
             &miss_keys,
             |b, ks| {
+                let pms = PerfectMapSparse::<u64, u64>::from_iter_perfect(entries.iter().copied())
+                    .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -495,6 +494,7 @@ fn bench_lookup_miss(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("PerfectSet", n), &miss_keys, |b, ks| {
+            let ps = PerfectSet::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
             b.iter(|| {
                 let mut count = 0u64;
                 for &k in ks {
@@ -510,6 +510,11 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("PerfectMap (packed CHD)", n),
             &miss_keys,
             |b, ks| {
+                let pm_packed = PerfectMap::<u64, u64, PackedChdPhf>::from_entries(
+                    entries.iter().copied(),
+                    BenchHasher::default(),
+                )
+                .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -526,6 +531,11 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("PerfectSet (packed CHD)", n),
             &miss_keys,
             |b, ks| {
+                let ps_packed = PerfectSet::<u64, PackedChdPhf>::from_keys(
+                    keys.iter().copied(),
+                    BenchHasher::default(),
+                )
+                .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -542,6 +552,9 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("PerfectMapBucketed", n),
             &miss_keys,
             |b, ks| {
+                let pmb =
+                    PerfectMapBucketed::<u64, u64>::from_iter_perfect(entries.iter().copied())
+                        .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -558,6 +571,8 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("PerfectSetBucketed", n),
             &miss_keys,
             |b, ks| {
+                let psb =
+                    PerfectSetBucketed::<u64>::from_iter_perfect(keys.iter().copied()).unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -574,6 +589,10 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("PerfectMapMultilevelBucketed", n),
             &miss_keys,
             |b, ks| {
+                let pmml = PerfectMapMultilevelBucketed::<u64, u64>::from_iter_perfect(
+                    entries.iter().copied(),
+                )
+                .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -590,6 +609,9 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("PerfectSetMultilevelBucketed", n),
             &miss_keys,
             |b, ks| {
+                let psml =
+                    PerfectSetMultilevelBucketed::<u64>::from_iter_perfect(keys.iter().copied())
+                        .unwrap();
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -603,6 +625,7 @@ fn bench_lookup_miss(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("hashbrown", n), &miss_keys, |b, ks| {
+            let hb: hashbrown::HashMap<u64, u64> = entries.iter().copied().collect();
             b.iter(|| {
                 let mut count = 0u64;
                 for &k in ks {
@@ -618,6 +641,10 @@ fn bench_lookup_miss(c: &mut Criterion) {
             BenchmarkId::new("HighTag128_Tomb", n),
             &miss_keys,
             |b, ks| {
+                let mut tomb = HighTag128_TombMap::<u64, u64>::with_capacity(n);
+                for &(k, v) in &entries {
+                    tomb.insert(k, v);
+                }
                 b.iter(|| {
                     let mut count = 0u64;
                     for &k in ks {
@@ -634,10 +661,87 @@ fn bench_lookup_miss(c: &mut Criterion) {
     group.finish();
 }
 
+// ── String hit lookup ─────────────────────────────────────────────────────
+
+fn bench_lookup_hit_string(c: &mut Criterion) {
+    let mut group = c.benchmark_group("perfect/lookup_hit_str");
+
+    for &n in SIZES_LOOKUP_STRING {
+        let random_keys = make_random_keys(n, 42);
+        let keys: Vec<String> = random_keys.iter().map(|k| format!("{k:020}")).collect();
+        let entries: Vec<(String, u64)> = keys
+            .iter()
+            .cloned()
+            .zip(random_keys.iter().copied())
+            .map(|(s, k)| (s, k.wrapping_mul(31)))
+            .collect();
+
+        group.throughput(Throughput::Elements(n as u64));
+        group.sample_size(sample_size_for(n));
+        cap_large_lookup_timing(&mut group, n);
+
+        group.bench_with_input(BenchmarkId::new("PerfectMap", n), &keys, |b, ks| {
+            let pm = PerfectMap::<String, u64>::from_iter_perfect(entries.iter().cloned()).unwrap();
+            b.iter(|| {
+                let mut sum = 0u64;
+                for k in ks {
+                    sum = sum.wrapping_add(*pm.get(k).unwrap_or(&0));
+                }
+                black_box(sum);
+            });
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("PerfectMapUnchecked", n),
+            &keys,
+            |b, ks| {
+                let pmu =
+                    PerfectMapUnchecked::<String, u64>::from_iter_perfect(entries.iter().cloned())
+                        .unwrap();
+                b.iter(|| {
+                    let mut sum = 0u64;
+                    for k in ks {
+                        sum = sum.wrapping_add(*pmu.get_unchecked(k));
+                    }
+                    black_box(sum);
+                });
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("hashbrown", n), &keys, |b, ks| {
+            let hb: hashbrown::HashMap<String, u64> = entries.iter().cloned().collect();
+            b.iter(|| {
+                let mut sum = 0u64;
+                for k in ks {
+                    sum = sum.wrapping_add(*hb.get(k).unwrap_or(&0));
+                }
+                black_box(sum);
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("HighTag128_Tomb", n), &keys, |b, ks| {
+            let mut tomb = HighTag128_TombMap::<String, u64>::with_capacity(n);
+            for (k, v) in &entries {
+                tomb.insert(k.clone(), *v);
+            }
+            b.iter(|| {
+                let mut sum = 0u64;
+                for k in ks {
+                    sum = sum.wrapping_add(*tomb.get(k).unwrap_or(&0));
+                }
+                black_box(sum);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_construction,
     bench_lookup_hit,
-    bench_lookup_miss
+    bench_lookup_miss,
+    bench_lookup_hit_string
 );
 criterion_main!(benches);
